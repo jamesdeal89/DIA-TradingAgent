@@ -3,6 +3,9 @@ import yfinance as yf
 import mysql.connector
 from mysql.connector import Error
 import pandas as pd
+import os
+from dotenv import load_dotenv
+load_dotenv()
 
 class stockExchange:
     '''
@@ -14,16 +17,16 @@ class stockExchange:
     4. Retrieve news on stocks.
     '''
 
-    def createServerConnection(hostName, userName, userPassword):
+    def createServerConnection():
         '''
         Establishes a connection to the server for storing trades the agent made and it's current portfolio.
         '''
         connection = None
         try:
             connection = mysql.connector.connect(
-                host=hostName,
-                user=userName,
-                passwd=userPassword
+                host=os.getenv("DBHOST"),
+                user=os.getenv("DBUSER"),
+                passwd=os.getenv("DBPASS")
             )    
             print("MySQL Database connection successful.")
         except Error as e:
@@ -60,3 +63,4 @@ class stockExchange:
         return stock.history(period=period)
     
 
+stockExchange.createServerConnection()

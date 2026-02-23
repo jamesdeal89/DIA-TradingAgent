@@ -2,7 +2,7 @@
 Stock Trading Intelligent Agent.
 '''
 
-class agent:
+class Agent:
     '''
     The intelligent stock trading agent.
     '''

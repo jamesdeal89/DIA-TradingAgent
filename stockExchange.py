@@ -7,7 +7,7 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
-class stockExchange:
+class StockExchange:
     '''
     Acts as the simulated environment (stock exchange.)
     Agent can interact to:

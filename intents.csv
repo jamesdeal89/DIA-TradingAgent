@@ -12,7 +12,6 @@ prompt,intent
 "Show me a breakdown of my holdings.","portfolio"
 "What assets are currently in the account?","portfolio"
 "List my open positions.","portfolio"
-"List my open positions.","portfolio"
 "How much profit have you generated this month?","performance"
 "Give me a summary of my account's growth.","performance"
 "Is the account in the green over the last week?","performance"

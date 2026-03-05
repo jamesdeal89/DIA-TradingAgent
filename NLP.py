@@ -7,10 +7,11 @@ from collections import defaultdict
 import re
 from numpy.linalg import norm
 
+
 def readIntentsCSV():
     intents = []
     with open('intents.csv', 'r', encoding='utf-8', newline='') as f:
-        r = csv.reader(f, delimeter=',')
+        r = csv.reader(f, delimiter=',')
         for row in r:
             # formatted as prompt,intent.
             intents.append(row)
@@ -54,11 +55,10 @@ def genInvertedIndex(countVect, XTrainTf):
         'index': invIdx,
         'norms': norms
     }
-
     return indexWithNorms
 
     
-def searchIntent(indexWithNorms, prompt, vectoriser, tfidf, intents):
+def searchIntent(indexWithNorms, prompt, vectoriser, tfidf):
     invIdx = indexWithNorms['index']
     norms = indexWithNorms['norms']
     queryCounts = vectoriser.transform([prompt])

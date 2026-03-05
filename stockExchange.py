@@ -62,5 +62,3 @@ class StockExchange:
         stock = yf.Ticker(ticker)
         return stock.history(period=period)
     
-
-stockExchange.createServerConnection()

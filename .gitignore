@@ -1,0 +1,22 @@
+# User specific 
+.env
+.venv/
+env/
+venv/
+instance/
+.vscode/settings.json
+
+# Python caching
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# NLTK 
+nltk_data/
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+*.log

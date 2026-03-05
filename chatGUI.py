@@ -84,7 +84,7 @@ def chatGUI():
         for agent in agents:
             column1, column2 = st.columns([3,1])
             column1.write(f"Agent {agent['id']} | Market: {agent['mic']}")
-            if column2.button(f"Converse with Agent {agent['id']}", key=f"btn{agent['id']}"):
+            if column2.button(f"Chat with Agent {agent['id']}", key=f"btn{agent['id']}"):
                 st.session_state.activeAgentId = agent['id']
                 st.rerun()
 

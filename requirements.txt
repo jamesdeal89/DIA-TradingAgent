@@ -3,3 +3,4 @@ mysql-connector-python
 yfinance
 nltk
 scikit-learn
+python-dotenv

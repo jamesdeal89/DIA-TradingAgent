@@ -28,5 +28,34 @@ The agent will assume the value will return to that mean and trade based on that
 
 ## Feature Engineering / Data Pre-processing
 
-To enable the agent to interpret the environment's dta, raw stock data may need to be converted into 'technical indicators'.
-These 
+To enable the agent to interpret the environment's data, raw stock data may need to be converted into 'technical indicators'.
+These can then serve as features for a neural networks. For example, as part of a Deep Q-Network.
+
+### Moving Averages - Smoothing
+
+This provides some smoothing to the price data; removing noise and small short-term price fluctuations which are unlikely to have meaningful impact on the agents decisions.
+A naive approach would be to use a moving average directly, where some look-back period is set to average over. However, this suffers from a lag effect where all the data points in the window have the same weighting as the current / most recent data point. 
+Instead, the Exponential Moving Average (EMA) assigns an exponentially increasing weight to more recent data points. This is implemented using a smoothing multiplier alpha (a).
+a = 2/(n+1), and EMA_t = (P_t * a) + (EMA_t-1 * (1-a)). 
+The EMA means the agent can quickly detect trend changes that the naive MA would hide.
+
+### Relative Strength Index (RSI) 
+
+RSI measures the magnitude of price changes to determine if a stock is 'oversold' or 'overbought'. The RSI can be between 0 and 100.
+RS = average gain/average loss, and RSI = 100-(100/1+RS).
+The convention in trading is that an RSI above 70 is considered overbought - this should signal to the agent that it should sell the stock.
+Whereas an RSI below 30 is oversold - which means the agent should likely buy.
+
+## Quantitative Fundamental Analysis
+
+QFA attempts to determine the 'intrinsic' value of a stock regardless of the exchange price.
+
+### Price to Earnings Ratio 
+
+Share price compared to earnings per share. A lower P/E relative to competing companies could indicate an undervalued stock that should be bought.
+
+### PEG Ratio
+
+Takes the price-earnings ratio and divides it by the earnings-per-share (EPS) growth rate.
+Convention is that a PEG below 1 are likely undervalued.
+

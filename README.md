@@ -20,7 +20,9 @@ Learns a policy over time to effectively maximise profit.
 
 ### NLP / NLU for Sentiment Analysis - BERT/FinBERT
 
-API used for Stock News: https://site.financialmodelingprep.com/developer/docs#stock-news
+Potential API for getting historical stock news: https://site.financialmodelingprep.com/developer/docs#stock-news.
+
+Kaggle Dataset of Financial News 2009-2020, ~4m articles: https://www.kaggle.com/datasets/miguelaenlle/massive-stock-news-analysis-db-for-nlpbacktests
 
 Agent collects news and quotes relating to listed companies. Companies with the most positive sentiment in their earnings reports, public statements, related news will be bought;
 whereas companies with negative sentiment will be shorted, for example.

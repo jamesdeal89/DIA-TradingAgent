@@ -4,3 +4,4 @@ yfinance
 nltk
 scikit-learn
 python-dotenv
+kagglehub

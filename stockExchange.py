@@ -98,6 +98,17 @@ class StockExchange:
         except Error as e:
             print(f'Error: {e}')
             return -1
+        
+    def __getMicTicker(self, ticker, mic):
+        '''
+        yFinance uses suffixes to check a ticker from a specific MIC.
+        This maps the official standard conventional MIC code to a MIC-specific ticker compatible with yFinance.
+        '''
+        # NOTE: Nasdaq / YSE do not have a suffix.
+        suffix = {'XLON': '.L', 'XHKG': '.HK', 'XJPX': '.T'}
+        # .get() is used as it prevents exceptions if an MIC is passed which is not in suffix dict (like XNAS which has no suffix.)
+        # Instead returns default value '' if no match in dict.
+        return f"{ticker}{suffix.get(mic, '')}"
 
     def initialiseAccount(self, accountId):
         '''
@@ -106,7 +117,7 @@ class StockExchange:
         If the account already exists, it will not be overwritten, no exception will be thrown.
         '''
         query = "INSERT IGNORE INTO accounts (accountId) VALUES (%s)"
-        self.__executeDatabaseQuery(query, (accountId))
+        self.__executeDatabaseQuery(query, (accountId,))
 
     def getStockData(self, ticker: str, period: str) -> Any:
         '''
@@ -122,7 +133,7 @@ class StockExchange:
         stock = yf.Ticker(ticker)
         return stock.history(period=period)
 
-    def placeShort(self, ticker, quantity, accountId):
+    def placeShort(self, ticker, mic, quantity, accountId):
         '''
         Short (with automated borrowing) - sell a stock not owned via borrowing the stock. 
         Automatically borrows the stock at current price, then immediately sells it.
@@ -130,17 +141,33 @@ class StockExchange:
         Idea is that if the price falls, the shorter profits. 
 
         No balance check performed as the stock is not being 'bought'.
+        Returns -1 if accountId does not exist.
         '''
+        # Add current price of shorted stock to account balance.
+        price = self.getStockData(self.__getMicTicker(ticker,mic), '1d')['Close'].iloc[-1]
+        cost = float(price * quantity)
+        query = "UPDATE accounts SET balance = balance + %s WHERE accountId = %s"
+        rowsAffected = self.__executeDatabaseQuery(query,(cost,accountId))
 
+        # Place the short trade and add to portfolio.
+        if rowsAffected:
+            query = "INSERT INTO trades (accountId, ticker, mic, tradeType, quantity, price) VALUES (%s,%s,%s,'short',%s,%s);"
+            self.__executeDatabaseQuery(query, (accountId, ticker, mic, quantity, price))
+            query = "INSERT INTO portfolios (accountId, ticker, mic, tradeType, quantity, closed) VALUES (%s,%s,%s,'short',%s, FALSE);"
+            self.__executeDatabaseQuery(query, (accountId, ticker, mic, quantity))
+        else:
+            print(f"ERROR: Account with ID {accountId} does not exist.")
+            return -1
+        
     def placeLong(self, ticker, mic, quantity, accountId):
         '''
         Long - purchase stock outright.
         Stock is bought for current market price. Stock is added to portfolio.
 
-        The balance of account with passed ID will be checked: returns -1 if not enough balance.
+        The balance of account with passed ID will be checked: returns -1 if not enough balance / accountId does not exist.
         '''
         # Fetch current price as of close.
-        price = self.getStockData(ticker, '1d')['Close'].iloc[-1]
+        price = self.getStockData(self.__getMicTicker(ticker,mic), '1d')['Close'].iloc[-1]
         # Calculate total.
         cost = float(price * quantity)
         # Check against balance and deduct.
@@ -155,6 +182,7 @@ class StockExchange:
             self.__executeDatabaseQuery(query, (accountId, ticker, mic, quantity))
         else:
             print(f"ERROR: Balance for account {accountId} too low for trade of cost {cost}")
+            return -1
 
 
     

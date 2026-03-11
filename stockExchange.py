@@ -171,7 +171,7 @@ class StockExchange:
         # Calculate total.
         cost = float(price * quantity)
         # Check against balance and deduct.
-        query = "UPDATE accounts SET balance = balance - %s WHERE accountId = %s AND balance >= %s"
+        query = "UPDATE accounts SET balance = balance - %s WHERE accountId = %s AND balance >= %s;"
         rowsAffected = self.__executeDatabaseQuery(query,(cost,accountId,cost))
         # Check if the balance check passed and the balance was deducted
         if rowsAffected:
@@ -183,6 +183,64 @@ class StockExchange:
         else:
             print(f"ERROR: Balance for account {accountId} too low for trade of cost {cost}")
             return -1
+        
+    def checkBalance(self, accountId):
+        '''
+        Returns the balance as a float for the account linked to the passed accountId.
+        Gracefully handles exceptions - returns None if failed for any reason.
+        '''
+        query = "SELECT balance FROM accounts WHERE accountId = %s;"
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(query, (accountId,))
+            result = cursor.fetchone()
+            if result:
+                return result[0]
+            else:
+                print(f"ERROR: No account found with accountId {accountId}")
+                return None
+        except Error as e:
+            print(f"ERROR: {e}")
+            return None
+
+    def checkPortfolio(self, accountId):
+        '''
+        Returns a Pandas dataframe of all of the currently held positions.
+        Includes held assets as well as open shorts. 
+        Gracefully handles exceptions - returns None if failed for any reason.
+        '''
+        # TODO: check if open shorts are 14 days old or more. if 14 days old (or older), close based on price at 14 days old.
+        query = "SELECT * FROM portfolios WHERE accountId = %s"
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(query, (accountId,))
+            # List of tuples of format [(id,ticker,mic,type,quantity),...]
+            rows = cursor.fetchall()
+            # Convert to Pandas dataframe, easier to manipulate for agent.
+            columns = [i[0] for i in cursor.description]
+            result = pd.DataFrame(rows, columns=columns)
+        except Error as e:
+            print(f"ERROR: {e}")
+            return None
+
+        return result
+
+    def sellLong(self):
+        '''
+        Sell a held portfolio asset at current market price.
+        '''
+
+    def closeShort(self):
+        '''
+        Settle a short early.
+        Otherwise, shorts are automatically closed at 14 days old based on price at that time.
+        '''
+
+
+
+
+
+
 
 
     

@@ -44,9 +44,9 @@ class StockExchange:
         "price FLOAT(32),"
         "timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
         ");" 
-
         self.__executeDatabaseQuery(self.connection, query)
-        query = "CREATE TABLE IF NOT EXISTS portfolio (" \
+
+        query = "CREATE TABLE IF NOT EXISTS portfolios (" \
         "accountId int," \
         "ticker varchar(255)," \
         "mic ENUM('XNAS','XLON','XHKG','XJPX')," \
@@ -56,9 +56,14 @@ class StockExchange:
         "closed BOOL"  \
         ");"
         self.__executeDatabaseQuery(self.connection, query)
+
+        query = "CREATE TABLE IF NOT EXISTS accounts (" \
+        "accountId int," \
+        # For new account, automatically fund with a set amount to work with.
+        "balance DECIMAL(32,2) DEFAULT 10000.00" \
+        ");"
+        self.__executeDatabaseQuery(self.connection, query)
         
-
-
     def __createServerConnection(self):
         '''
         Establishes a connection to the server for storing trades the agent made and it's current portfolio.
@@ -88,6 +93,20 @@ class StockExchange:
         except Error as e:
             print(f'Error: {e}')
 
+    def initialiseAccount(self, accountId):
+        '''
+        Register a new trading account.
+        Will automatically be funded with the default seed balance (10,000.00 USD).
+        If the account already exists, it will not be overwritten, no exception will be thrown.
+        '''
+        query = "INSERT IGNORE INTO accounts (accountId) VALUES (%s)"
+        cursor = self.connection.cursor()
+        try: 
+            cursor.execute(query, (accountId,))
+            self.connection.commit()
+            print(f"Trading acount with ID {accountId} has been initialised.")
+        except Error as e:
+            print(f"Error when initialising trading account: {e}")
 
     def getStockData(self, ticker: str, period: str) -> Any:
         '''

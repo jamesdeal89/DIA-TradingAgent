@@ -27,7 +27,7 @@ class StockExchange:
         '''
         self.connection = self.__createServerConnection()
         query = "CREATE DATABASE IF NOT EXISTS StockExchange;" 
-        self.__executeDatabaseQuery(self.connection, query)
+        self.__executeDatabaseQuery(query)
 
         self.connection.database = 'StockExchange'
 
@@ -44,7 +44,7 @@ class StockExchange:
         "price FLOAT(32),"
         "timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
         ");" 
-        self.__executeDatabaseQuery(self.connection, query)
+        self.__executeDatabaseQuery(query)
 
         query = "CREATE TABLE IF NOT EXISTS portfolios (" \
         "accountId int," \
@@ -55,14 +55,14 @@ class StockExchange:
         # If a short trade has been closed or not.
         "closed BOOL"  \
         ");"
-        self.__executeDatabaseQuery(self.connection, query)
+        self.__executeDatabaseQuery(query)
 
         query = "CREATE TABLE IF NOT EXISTS accounts (" \
         "accountId int," \
         # For new account, automatically fund with a set amount to work with.
         "balance DECIMAL(32,2) DEFAULT 10000.00" \
         ");"
-        self.__executeDatabaseQuery(self.connection, query)
+        self.__executeDatabaseQuery(query)
         
     def __createServerConnection(self):
         '''
@@ -80,18 +80,24 @@ class StockExchange:
             print(f'Error: {e}')
         return connection
 
-    def __executeDatabaseQuery(self, connection, query):
+    def __executeDatabaseQuery(self, query, params=None):
         '''
         Executes an SQL query on the database.
         Example queries: 'CREATE DATABASE IF NOT EXISTS stockExchange' 'CREATE TABLE IF NOT EXISTS trades'.
         '''
-        cursor = connection.cursor()
+        cursor = self.connection.cursor()
         try:
-            cursor.execute(query)
-            connection.commit()
+            if params:
+                cursor.execute(query,params)
+            else:
+                cursor.execute(query)
+            self.connection.commit()
             print("Database query successful!")
+            # Useful to check if updates worked.
+            return cursor.rowcount
         except Error as e:
             print(f'Error: {e}')
+            return -1
 
     def initialiseAccount(self, accountId):
         '''
@@ -100,13 +106,7 @@ class StockExchange:
         If the account already exists, it will not be overwritten, no exception will be thrown.
         '''
         query = "INSERT IGNORE INTO accounts (accountId) VALUES (%s)"
-        cursor = self.connection.cursor()
-        try: 
-            cursor.execute(query, (accountId,))
-            self.connection.commit()
-            print(f"Trading acount with ID {accountId} has been initialised.")
-        except Error as e:
-            print(f"Error when initialising trading account: {e}")
+        self.__executeDatabaseQuery(query, (accountId))
 
     def getStockData(self, ticker: str, period: str) -> Any:
         '''
@@ -132,13 +132,29 @@ class StockExchange:
         No balance check performed as the stock is not being 'bought'.
         '''
 
-    def placeLong(self, ticker, quantity, accountId):
+    def placeLong(self, ticker, mic, quantity, accountId):
         '''
         Long - purchase stock outright.
         Stock is bought for current market price. Stock is added to portfolio.
 
         The balance of account with passed ID will be checked: returns -1 if not enough balance.
         '''
+        # Fetch current price as of close.
+        price = self.getStockData(ticker, '1d')['Close'].iloc[-1]
+        # Calculate total.
+        cost = float(price * quantity)
+        # Check against balance and deduct.
+        query = "UPDATE accounts SET balance = balance - %s WHERE accountId = %s AND balance >= %s"
+        rowsAffected = self.__executeDatabaseQuery(query,(cost,accountId,cost))
+        # Check if the balance check passed and the balance was deducted
+        if rowsAffected:
+            print("Balance deducted, trade is executing...")
+            query = "INSERT INTO trades (accountId, ticker, mic, tradeType, quantity, price) VALUES (%s,%s,%s,'long',%s,%s);"
+            self.__executeDatabaseQuery(query, (accountId, ticker, mic, quantity, price))
+            query = "INSERT INTO portfolios (accountId, ticker, mic, tradeType, quantity) VALUES (%s,%s,%s,'long',%s);"
+            self.__executeDatabaseQuery(query, (accountId, ticker, mic, quantity))
+        else:
+            print(f"ERROR: Balance for account {accountId} too low for trade of cost {cost}")
 
 
     

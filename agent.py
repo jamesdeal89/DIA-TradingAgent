@@ -21,7 +21,7 @@ class Agent:
         '''
         'mic': 
         - String representing the Market Identifier Code - defines what exchange this agent will be operating within.
-        - NASDAQ = 'XNAS', London Stock Exchange = 'XLON', Hong Kong Exchanges and Clearing = 'XHKG', Japan Exchange Group = 'XPJX'.
+        - NASDAQ = 'XNAS', London Stock Exchange = 'XLON', Hong Kong Exchanges and Clearing = 'XHKG', Japan Exchange Group = 'XJPX'.
 
         'preferredStrategy': String representing a preferred strategy, useful for experimentation with specific approaches.
 

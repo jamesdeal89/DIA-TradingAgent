@@ -40,9 +40,9 @@ class StockExchange:
         # DECIMAL(10,4) specifies precision and scale.
         # 10 is the total number of digits (precision.)
         # 4 is the number of digits after the decimal point (scale.)
-        "quantity DECIMAL(10,4),"
-        "price FLOAT(32),"
-        "timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+        "quantity DECIMAL(10,4)," \
+        "price FLOAT(32)," \
+        "timestamp DATETIME" \
         ");" 
         self.__executeDatabaseQuery(query)
 
@@ -53,7 +53,10 @@ class StockExchange:
         "tradeType ENUM('long','short')," \
         "quantity DECIMAL(10,4),"  \
         # If a short trade has been closed or not.
-        "closed BOOL"  \
+        "closed BOOL," \
+        "priceAtShort FLOAT(32),"  \
+        # Important as we need to ensure that new trades update the quantity of existing held stock.
+        "UNIQUE KEY (accountId, ticker, tradeType)" \
         ");"
         self.__executeDatabaseQuery(query)
 
@@ -119,47 +122,51 @@ class StockExchange:
         query = "INSERT IGNORE INTO accounts (accountId) VALUES (%s)"
         self.__executeDatabaseQuery(query, (accountId,))
 
-    def getStockData(self, ticker: str, period: str) -> Any:
+    def getStockData(self, ticker: str, period: str = None, start: str = None, end: str = None) -> Any:
         '''
-        Returns a dataframe for the provided ticker filled with that period's daily:
-        - open, high, low, close, volume, dividends, stock splits.
-
-        Example usage:
-        print(getStockData('AAPL', '3mo').head())
+        Returns a dataframe for the provided ticker.
+        If period is provided, returns data for that period.
+        If start and end are provided, returns data between those dates.
 
         Valid periods include: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max.
         '''
 
         stock = yf.Ticker(ticker)
+        if start or end:
+            return stock.history(start=start, end=end)
         return stock.history(period=period)
 
-    def placeShort(self, ticker, mic, quantity, accountId):
+    def placeShort(self, ticker, mic, quantity, accountId, simDate):
         '''
         Short (with automated borrowing) - sell a stock not owned via borrowing the stock. 
         Automatically borrows the stock at current price, then immediately sells it.
         Once 14 days pass, the current price is used to purchase a new stock and repay the broker. 
         Idea is that if the price falls, the shorter profits. 
 
+        simDate allows the agent to act on historical data. 
+        The agent can act on historical data to enable repeatability of experiments.
+
         No balance check performed as the stock is not being 'bought'.
         Returns -1 if accountId does not exist.
         '''
         # Add current price of shorted stock to account balance.
-        price = self.getStockData(self.__getMicTicker(ticker,mic), '1d')['Close'].iloc[-1]
+        price = self.getStockData(self.__getMicTicker(ticker,mic), end=simDate)['Close'].iloc[-1]
         cost = float(price * quantity)
         query = "UPDATE accounts SET balance = balance + %s WHERE accountId = %s"
         rowsAffected = self.__executeDatabaseQuery(query,(cost,accountId))
 
         # Place the short trade and add to portfolio.
         if rowsAffected:
-            query = "INSERT INTO trades (accountId, ticker, mic, tradeType, quantity, price) VALUES (%s,%s,%s,'short',%s,%s);"
+            query = "INSERT INTO trades (accountId, ticker, mic, tradeType, quantity, price, timestamp) VALUES (%s,%s,%s,'short',%s,%s,%s);"
+            self.__executeDatabaseQuery(query, (accountId, ticker, mic, quantity, price, simDate))
+            query = "INSERT INTO portfolios (accountId, ticker, mic, tradeType, quantity, closed, priceAtShort) VALUES (%s,%s,%s,'short',%s, FALSE, %s) " \
+                    "ON DUPLICATE KEY UPDATE quantity = quantity + VALUES(quantity);"
             self.__executeDatabaseQuery(query, (accountId, ticker, mic, quantity, price))
-            query = "INSERT INTO portfolios (accountId, ticker, mic, tradeType, quantity, closed) VALUES (%s,%s,%s,'short',%s, FALSE);"
-            self.__executeDatabaseQuery(query, (accountId, ticker, mic, quantity))
         else:
             print(f"ERROR: Account with ID {accountId} does not exist.")
             return -1
         
-    def placeLong(self, ticker, mic, quantity, accountId):
+    def placeLong(self, ticker, mic, quantity, accountId, simDate):
         '''
         Long - purchase stock outright.
         Stock is bought for current market price. Stock is added to portfolio.
@@ -167,7 +174,7 @@ class StockExchange:
         The balance of account with passed ID will be checked: returns -1 if not enough balance / accountId does not exist.
         '''
         # Fetch current price as of close.
-        price = self.getStockData(self.__getMicTicker(ticker,mic), '1d')['Close'].iloc[-1]
+        price = self.getStockData(self.__getMicTicker(ticker,mic), end=simDate)['Close'].iloc[-1]
         # Calculate total.
         cost = float(price * quantity)
         # Check against balance and deduct.
@@ -176,9 +183,12 @@ class StockExchange:
         # Check if the balance check passed and the balance was deducted
         if rowsAffected:
             print("Balance deducted, trade is executing...")
-            query = "INSERT INTO trades (accountId, ticker, mic, tradeType, quantity, price) VALUES (%s,%s,%s,'long',%s,%s);"
-            self.__executeDatabaseQuery(query, (accountId, ticker, mic, quantity, price))
-            query = "INSERT INTO portfolios (accountId, ticker, mic, tradeType, quantity) VALUES (%s,%s,%s,'long',%s);"
+            query = "INSERT INTO trades (accountId, ticker, mic, tradeType, quantity, price, timestamp) VALUES (%s,%s,%s,'long',%s,%s,%s);"
+            self.__executeDatabaseQuery(query, (accountId, ticker, mic, quantity, price, simDate))
+            # If ticker for accountId already in portfolios: update the quantity rather than add a new record.
+            # Insert new record otherwise.
+            query = "INSERT INTO portfolios (accountId, ticker, mic, tradeType, quantity) VALUES (%s,%s,%s,'long',%s) " \
+            "ON DUPLICATE KEY UPDATE quantity = quantity + VALUES(quantity);"
             self.__executeDatabaseQuery(query, (accountId, ticker, mic, quantity))
         else:
             print(f"ERROR: Balance for account {accountId} too low for trade of cost {cost}")
@@ -214,7 +224,7 @@ class StockExchange:
         cursor = self.connection.cursor()
         try:
             cursor.execute(query, (accountId,))
-            # List of tuples of format [(id,ticker,mic,type,quantity),...]
+            # List of tuples of format [(id,ticker,mic,type,quantity,closed,priceAtShort),...]
             rows = cursor.fetchall()
             # Convert to Pandas dataframe, easier to manipulate for agent.
             columns = [i[0] for i in cursor.description]
@@ -225,10 +235,19 @@ class StockExchange:
 
         return result
 
-    def sellLong(self):
+    def sellLong(self, accountId, ticker, quantity):
         '''
         Sell a held portfolio asset at current market price.
         '''
+        # Get current price.
+        price = self.getStockData(self.__getMicTicker(ticker, mic), '1d')['Close'].iloc[-1]
+
+        # Check if the account holds that asset and at least that quantity.
+
+        
+        # If quantity is exactly the quantity held, remove record.
+        # Otherwise update the quantity to deduct the quantity sold.
+
 
     def closeShort(self):
         '''

@@ -235,12 +235,12 @@ class StockExchange:
 
         return result
 
-    def sellLong(self, accountId, ticker, quantity):
+    def sellLong(self, accountId, ticker, mic, quantity, simDate):
         '''
         Sell a held portfolio asset at current market price.
         '''
         # Get current price.
-        price = self.getStockData(self.__getMicTicker(ticker, mic), '1d')['Close'].iloc[-1]
+        price = self.getStockData(self.__getMicTicker(ticker, mic), end=simDate)['Close'].iloc[-1]
 
         # Check if the account holds that asset and at least that quantity.
 
@@ -249,7 +249,7 @@ class StockExchange:
         # Otherwise update the quantity to deduct the quantity sold.
 
 
-    def closeShort(self):
+    def closeShort(self, simDate):
         '''
         Settle a short early.
         Otherwise, shorts are automatically closed at 14 days old based on price at that time.

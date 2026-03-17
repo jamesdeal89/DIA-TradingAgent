@@ -39,6 +39,11 @@ class Agent:
         2. Decide approach based on past performance / sampling.
         3. Decide trade (and trade type) using approach chosen.
         4. Execute trade via stock exchange. 
+
+        IMPORTANT: yFinance uses a combination of scraping Yahoo Finance via HTTP and calling their API.
+        Therefore may be rate-limited if requests are too frequent.
+        Best to use a 2s wait between requests, therefore simulations on historical data must be no faster than 2s per day.
+        To simulate over a longer period, use larger skips, e.g. week-to-week jumps instead of day-to-day.
         '''
 
 

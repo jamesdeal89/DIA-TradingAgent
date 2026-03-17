@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Dict, List
 import yfinance as yf
 import mysql.connector
 from mysql.connector import Error
@@ -64,6 +64,20 @@ class StockExchange:
         "accountId int," \
         # For new account, automatically fund with a set amount to work with.
         "balance DECIMAL(32,2) DEFAULT 10000.00" \
+        ");"
+        self.__executeDatabaseQuery(query)
+
+        query = "CREATE TABLE IF NOT EXISTS news_headlines (" \
+        "id INT PRIMARY KEY," \
+        "ticker VARCHAR(255)," \
+        "headline TEXT," \
+        "url TEXT," \
+        "publisher VARCHAR(255)," \
+        "date DATE," \
+        "sentiment VARCHAR(20)," \
+        "sentiment_score FLOAT(32)," \
+        "confidence FLOAT(32)," \
+        "INDEX idx_ticker_date (ticker, date)" \
         ");"
         self.__executeDatabaseQuery(query)
         
@@ -238,22 +252,158 @@ class StockExchange:
     def sellLong(self, accountId, ticker, mic, quantity, simDate):
         '''
         Sell a held portfolio asset at current market price.
+        Atomic operation - will only succeed if account has sufficient quantity.
+        If quantity becomes 0, removes the position record to keep DB clean.
+        Returns 0 on success, -1 on failure.
         '''
         # Get current price.
         price = self.getStockData(self.__getMicTicker(ticker, mic), end=simDate)['Close'].iloc[-1]
-
-        # Check if the account holds that asset and at least that quantity.
-
+        proceeds = float(price * quantity)
         
-        # If quantity is exactly the quantity held, remove record.
-        # Otherwise update the quantity to deduct the quantity sold.
+        # Atomically: Reduce quantity only if we have enough
+        query = "UPDATE portfolios SET quantity = quantity - %s " \
+                "WHERE accountId = %s AND ticker = %s AND tradeType = 'long' " \
+                "AND quantity >= %s"
+        rowsAffected = self.__executeDatabaseQuery(query, (quantity, accountId, ticker, quantity))
+        
+        if rowsAffected > 0:
+            # Credit the account with proceeds
+            query = "UPDATE accounts SET balance = balance + %s WHERE accountId = %s"
+            self.__executeDatabaseQuery(query, (proceeds, accountId))
+            
+            # Log the trade
+            query = "INSERT INTO trades (accountId, ticker, mic, tradeType, quantity, price, timestamp) " \
+                    "VALUES (%s, %s, %s, 'sell', %s, %s, %s)"
+            self.__executeDatabaseQuery(query, (accountId, ticker, mic, quantity, price, simDate))
+            
+            # Clean up zero-quantity positions
+            query = "DELETE FROM portfolios " \
+                    "WHERE accountId = %s AND ticker = %s AND tradeType = 'long' AND quantity <= 0"
+            self.__executeDatabaseQuery(query, (accountId, ticker))
+            
+            print(f"Sold {quantity} of {ticker} at {price}. Proceeds: {proceeds}")
+            return 0
+        else:
+            print(f"ERROR: Insufficient quantity of {ticker} to sell.")
+            return -1
 
 
-    def closeShort(self, simDate):
+    def closeShort(self, accountId, ticker, mic, quantity, simDate):
         '''
         Settle a short early.
-        Otherwise, shorts are automatically closed at 14 days old based on price at that time.
+        Must purchase the stock at the current price to return it to the broker.
+        If the price is lower than the priceAtShort, the difference is profit.
+        If the price is higher, then the difference is a loss.
+        Uses closed flag to prevent race conditions - won't close an already-closed position.
+        Returns 0 if succeeded, -1 if failed.
         '''
+        # Get current price
+        price = self.getStockData(self.__getMicTicker(ticker, mic), end=simDate)['Close'].iloc[-1]
+        cost_to_buyback = float(price * quantity)
+        
+        # Atomically: Check if open (closed IS FALSE), deduct quantity, and set closed=TRUE
+        # This prevents race conditions where the same short is closed twice
+        query = "UPDATE portfolios SET quantity = quantity - %s, closed = TRUE " \
+                "WHERE accountId = %s AND ticker = %s AND tradeType = 'short' " \
+                "AND quantity >= %s AND closed IS FALSE"
+        rowsAffected = self.__executeDatabaseQuery(query, (quantity, accountId, ticker, quantity))
+        
+        if rowsAffected > 0:
+            # Deduct cost from balance
+            query = "UPDATE accounts SET balance = balance - %s WHERE accountId = %s"
+            self.__executeDatabaseQuery(query, (cost_to_buyback, accountId))
+            
+            # Log the trade
+            query = "INSERT INTO trades (accountId, ticker, mic, tradeType, quantity, price, timestamp) " \
+                    "VALUES (%s, %s, %s, 'short', %s, %s, %s)"
+            self.__executeDatabaseQuery(query, (accountId, ticker, mic, quantity, price, simDate))
+            
+            print(f"Short for {ticker} closed at {price}. Cost to buy back: {cost_to_buyback}")
+            return 0
+        else:
+            print(f"ERROR: No open short found for {ticker} with sufficient quantity or already closed.")
+            return -1
+    
+    def cleanupClosedPositions(self, accountId):
+        '''
+        Remove fully closed positions (quantity <= 0 and closed = TRUE) from portfolios.
+        Prevents stale data from accumulating in the DB.
+        Returns the number of deleted records.
+        '''
+        query = "DELETE FROM portfolios WHERE accountId = %s AND closed IS TRUE AND quantity <= 0"
+        rowsDeleted = self.__executeDatabaseQuery(query, (accountId,))
+        if rowsDeleted > 0:
+            print(f"Cleaned up {rowsDeleted} closed position(s).")
+        return rowsDeleted
+
+    def getNewsForStock(self, ticker: str, mic: str, simDate: str) -> List[Dict[str, Any]]:
+        '''
+        Retrieve raw news headlines for a stock on a given simulation date (data layer).
+        
+        Returns raw headline data without aggregation or intelligence processing.
+        Sentiment analysis is the responsibility of the agent/consumer.
+        
+        Accounts for date imprecision in Kaggle dataset by querying headlines from simDate through simDate+1.
+        
+        Args:
+            ticker: Stock ticker symbol (e.g., 'AAPL')
+            mic: Market Identifier Code for validation (e.g., 'XNAS', 'XLON')
+            simDate: Date string in YYYY-MM-DD format for historical simulation
+            
+        Returns:
+            List of headline dicts (one entry per headline):
+            [
+                {
+                    'headline': str,        # Full headline text
+                    'sentiment': str,       # 'positive', 'neutral', or 'negative'
+                    'score': float,         # Normalized score [-1.0, +1.0]
+                    'url': str,             # Article URL
+                    'date': str,            # Publication date (YYYY-MM-DD)
+                    'publisher': str        # News source
+                },
+                ...
+            ]
+            Returns empty list [] if no headlines found.
+        '''
+        from datetime import datetime, timedelta
+        
+        try:
+            sim_date_obj = datetime.strptime(simDate, '%Y-%m-%d')
+            next_date = sim_date_obj + timedelta(days=1)
+            next_date_str = next_date.strftime('%Y-%m-%d')
+        except ValueError:
+            print(f"ERROR: Invalid date format {simDate}. Expected YYYY-MM-DD.")
+            return []
+        
+        query = "SELECT headline, sentiment, sentiment_score, url, date, publisher " \
+                "FROM news_headlines " \
+                "WHERE ticker = %s AND date >= %s AND date <= %s " \
+                "ORDER BY date ASC"
+        
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(query, (ticker, simDate, next_date_str))
+            rows = cursor.fetchall()
+            
+            headlines = []
+            for row in rows:
+                headline, sentiment, score, url, date, publisher = row
+                headlines.append({
+                    'headline': headline,
+                    'sentiment': sentiment,
+                    'score': float(score),
+                    'url': url,
+                    'date': str(date),
+                    'publisher': publisher
+                })
+            
+            return headlines
+        
+        except Exception as e:
+            print(f"ERROR querying news for {ticker}: {e}")
+            return []
+
+
 
 
 

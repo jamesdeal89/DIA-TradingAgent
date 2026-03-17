@@ -5,3 +5,6 @@ nltk
 scikit-learn
 python-dotenv
 kagglehub
+transformers
+datasets
+torch

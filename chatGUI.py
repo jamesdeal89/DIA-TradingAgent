@@ -27,7 +27,6 @@ def initNLP():
 def getRunningAgents():
     return st.session_state.get('activeAgents', {})
 
-@st.cache_resource
 def initStockExchange():
     return StockExchange()
 

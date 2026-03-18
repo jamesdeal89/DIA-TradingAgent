@@ -5,6 +5,9 @@ from mysql.connector import Error
 import os
 from dotenv import load_dotenv
 import json
+from agent import Agent
+from stockExchange import StockExchange
+from responseFormatter import ResponseFormatter
 
 load_dotenv()
 
@@ -18,49 +21,42 @@ def initNLP():
     return indexWithNorms, countVect, tfTransformer, intents
 
 def getRunningAgents():
+    return st.session_state.get('activeAgents', {})
+
+@st.cache_resource
+def initStockExchange():
+    return StockExchange()
+
+def startAgent(mic, prefStrategy, bannedList):
+    exchange = initStockExchange()
+    
     try:
-        connection = mysql.connector.connect(
-            host=os.getenv("DBHOST"),
-            user=os.getenv("DBUSER"),
-            passwd=os.getenv("DBPASS")
-        )    
-        cursor = connection.cursor(dictionary=True)
-
-        # Database and table setup.
-        cursor.execute("CREATE DATABASE IF NOT EXISTS agentData")
-        cursor.execute("USE agentData")
-        cursor.execute("CREATE TABLE IF NOT EXISTS activeAgents (id INT AUTO_INCREMENT PRIMARY KEY, mic VARCHAR(10), prefStrategy VARCHAR(100), banned JSON)")
-        connection.commit()
-
-        # Query and return the agent data. 
-        cursor.execute("SELECT * FROM activeAgents")
-        agents = cursor.fetchall()
-
-        cursor.close()
-        connection.close()
-        return agents
-    except Error as e:
-        print(f'Error: {e}')
-        return []
-
-def startAgent(mic, strategy, banned):
-    # TODO: Start agent as a background process.
-    try:
-        connection = mysql.connector.connect(
-            host=os.getenv("DBHOST"),
-            user=os.getenv("DBUSER"),
-            passwd=os.getenv("DBPASS")
-        )    
-        cursor = connection.cursor(dictionary=True)
-        cursor.execute("USE agentData")
-        cursor.execute("INSERT INTO activeAgents (mic, prefStrategy, banned) VALUES (%s,%s,%s)",
-                       (mic, strategy, json.dumps(banned)))
-        connection.commit()
-        cursor.close()
-        connection.close()
-    except Error as e:
-        print(f'Error: {e}')
-        return []
+        accountId = 10000 + len(st.session_state.get('activeAgents', {}))
+        exchange.initialiseAccount(accountId)
+        
+        preferred = prefStrategy if prefStrategy and prefStrategy != "None" else None
+        agent = Agent(
+            agentId=accountId,
+            accountId=accountId,
+            mic=mic,
+            preferredStrategy=preferred,
+            bannedStrategies=bannedList
+        )
+        
+        if 'activeAgents' not in st.session_state:
+            st.session_state.activeAgents = {}
+        
+        st.session_state.activeAgents[accountId] = {
+            'agent': agent,
+            'mic': mic,
+            'prefStrategy': preferred,
+            'banned': bannedList
+        }
+        
+        return accountId
+    except Exception as e:
+        print(f'Error starting agent: {e}')
+        return None
 
 
 # Runs for any GUI refresh event, e.g. initial load, input, UI interaction.
@@ -81,11 +77,11 @@ def chatGUI():
         agents = getRunningAgents()
         if not agents:
             st.write("No running agents.")
-        for agent in agents:
+        for accountId, agentData in agents.items():
             column1, column2 = st.columns([3,1])
-            column1.write(f"Agent {agent['id']} | Market: {agent['mic']}")
-            if column2.button(f"Chat with Agent {agent['id']}", key=f"btn{agent['id']}"):
-                st.session_state.activeAgentId = agent['id']
+            column1.write(f"Agent {accountId} | Market: {agentData['mic']}")
+            if column2.button(f"Chat with Agent {accountId}", key=f"btn{accountId}"):
+                st.session_state.activeAgentId = accountId
                 st.rerun()
 
         # New agent form.
@@ -93,15 +89,19 @@ def chatGUI():
         st.subheader("Start a New Agent")
         with st.form("newAgent"):
             mic = st.selectbox("Market (MIC)", ["XLON", "XNAS", "XHKG", "XJPX"])
-            prefStrategy = st.selectbox("Prefered strategy (optional)", ["None","Strat1", "Strat2", "Strat3"])
-            banned = st.multiselect("Banned stategies (optional)", ["strat1","strat2","strat3"])
+            prefStrategy = st.selectbox("Preferred strategy (optional)", ["None", "Sentiment", "MeanReversion", "Technical", "Fundamental"])
+            banned = st.multiselect("Banned strategies (optional)", ["Sentiment", "MeanReversion", "Technical", "Fundamental"])
             if st.form_submit_button("Start Agent"):
-                startAgent(mic,prefStrategy,banned)
-                st.rerun()
+                accountId = startAgent(mic, prefStrategy, banned)
+                if accountId:
+                    st.success(f"Agent created with account ID: {accountId}")
+                    st.rerun()
+                else:
+                    st.error("Failed to create agent")
 
     else:
         # Conversational view for a specific agent.
-
+        exchange = initStockExchange()
         aId = st.session_state.activeAgentId
         messagesKey = f"messages{aId}"
 
@@ -132,17 +132,42 @@ def chatGUI():
 
             # Search intents against user prompt.
             match = nlp.searchIntent(indexWithNorms, prompt, countVect, tfTransformer)
+            response = "Sorry I didn't understand that."
+            
             if match:
                 docId, score = match
                 intentLabel = intents[docId][1]
-                # Intents supported include:
-                # performance, actions, portfolio.
-                if intentLabel == "actions":
-                    response = "Here is what I've done while you were away..."
-                else:
-                    response = "Sorry I didn't understand that."
-            else:
-                response = "Sorry I didn't understand that."
+                agentData = st.session_state.activeAgents.get(aId)
+                
+                if agentData:
+                    agent = agentData['agent']
+                    
+                    if intentLabel == "performance":
+                        metrics = agent.performanceTracker.getAllMetrics()
+                        response = ResponseFormatter.formatStrategyPerformance(metrics)
+                    
+                    elif intentLabel == "actions":
+                        recentTrades = agent._executionLog
+                        response = ResponseFormatter.formatRecentTrades(recentTrades, limit=10)
+                    
+                    elif intentLabel == "portfolio":
+                        balance = exchange.checkBalance(agent.accountId) or 0
+                        portfolio = exchange.checkPortfolio(agent.accountId)
+                        portfolioDict = {}
+                        if portfolio is not None and not portfolio.empty:
+                            for _, row in portfolio.iterrows():
+                                ticker = row.get('ticker')
+                                tradeType = row.get('tradeType')
+                                if ticker:
+                                    if ticker not in portfolioDict:
+                                        portfolioDict[ticker] = {}
+                                    if tradeType == 'long':
+                                        portfolioDict[ticker]['long'] = row.get('quantity', 0)
+                                        portfolioDict[ticker]['longEntryPrice'] = row.get('entryPrice', 0)
+                                    elif tradeType == 'short':
+                                        portfolioDict[ticker]['short'] = row.get('quantity', 0)
+                                        portfolioDict[ticker]['shortEntryPrice'] = row.get('priceAtShort', 0)
+                        response = ResponseFormatter.formatPortfolioSummary(portfolioDict, balance)
 
             # Bot response
             with st.chat_message("assistant"):

@@ -32,59 +32,54 @@ class StockExchange:
         self.connection = self.__createServerConnection()
         self.performanceTracker = performanceTracker  # For close-trade callbacks
         
-        query = "CREATE DATABASE IF NOT EXISTS StockExchange;" 
+        query = "CREATE DATABASE IF NOT EXISTS StockExchange;"
         self.__executeDatabaseQuery(query)
 
         self.connection.database = 'StockExchange'
 
-        query = "CREATE TABLE IF NOT EXISTS trades (" \
-        "accountId int," \
-        "ticker varchar(255)," \
-        "mic ENUM('XNAS','XLON','XHKG','XJPX')," \
-        "tradeType ENUM('long','short')," \
-        "quantity DECIMAL(10,4)," \
-        "price FLOAT(32)," \
-        "timestamp DATETIME," \
-        "strategyName VARCHAR(255)," \
-        "agentId INT" \
-        ");" 
+        query = ("CREATE TABLE IF NOT EXISTS trades ("
+                 "accountId INT, "
+                 "ticker VARCHAR(255), "
+                 "mic ENUM('XNAS','XLON','XHKG','XJPX'), "
+                 "tradeType ENUM('long','short'), "
+                 "quantity DECIMAL(10,4), "
+                 "price FLOAT, "
+                 "timestamp DATETIME, "
+                 "strategyName VARCHAR(255), "
+                 "agentId INT)")
         self.__executeDatabaseQuery(query)
 
-        query = "CREATE TABLE IF NOT EXISTS portfolios (" \
-        "accountId int," \
-        "ticker varchar(255)," \
-        "mic ENUM('XNAS','XLON','XHKG','XJPX')," \
-        "tradeType ENUM('long','short')," \
-        "quantity DECIMAL(10,4),"  \
-        "closed BOOL," \
-        "priceAtShort FLOAT(32),"  \
-        "entryPrice FLOAT(32)," \
-        "strategyName VARCHAR(255)," \
-        "agentId INT," \
-        "entryDate DATE," \
-        "UNIQUE KEY (accountId, ticker, tradeType)" \
-        ");"
+        query = ("CREATE TABLE IF NOT EXISTS portfolios ("
+                 "accountId INT, "
+                 "ticker VARCHAR(255), "
+                 "mic ENUM('XNAS','XLON','XHKG','XJPX'), "
+                 "tradeType ENUM('long','short'), "
+                 "quantity DECIMAL(10,4), "
+                 "closed BOOL, "
+                 "priceAtShort FLOAT, "
+                 "entryPrice FLOAT, "
+                 "strategyName VARCHAR(255), "
+                 "agentId INT, "
+                 "entryDate DATE, "
+                 "UNIQUE KEY (accountId, ticker, tradeType))")
         self.__executeDatabaseQuery(query)
 
-        query = "CREATE TABLE IF NOT EXISTS accounts (" \
-        "accountId int," \
-        # For new account, automatically fund with a set amount to work with.
-        "balance DECIMAL(32,2) DEFAULT 10000.00" \
-        ");"
+        query = ("CREATE TABLE IF NOT EXISTS accounts ("
+                 "accountId INT PRIMARY KEY, "
+                 "balance DECIMAL(32,2) DEFAULT 10000.00)")
         self.__executeDatabaseQuery(query)
 
-        query = "CREATE TABLE IF NOT EXISTS news_headlines (" \
-        "id INT PRIMARY KEY," \
-        "ticker VARCHAR(255)," \
-        "headline TEXT," \
-        "url TEXT," \
-        "publisher VARCHAR(255)," \
-        "date DATE," \
-        "sentiment VARCHAR(20)," \
-        "sentiment_score FLOAT(32)," \
-        "confidence FLOAT(32)," \
-        "INDEX idx_ticker_date (ticker, date)" \
-        ");"
+        query = ("CREATE TABLE IF NOT EXISTS news_headlines ("
+                 "id INT PRIMARY KEY, "
+                 "ticker VARCHAR(255), "
+                 "headline TEXT, "
+                 "url TEXT, "
+                 "publisher VARCHAR(255), "
+                 "date DATE, "
+                 "sentiment VARCHAR(20), "
+                 "sentiment_score FLOAT, "
+                 "confidence FLOAT, "
+                 "INDEX idx_ticker_date (ticker, date))")
         self.__executeDatabaseQuery(query)
         
     def __createServerConnection(self):
@@ -155,6 +150,34 @@ class StockExchange:
         if start or end:
             return stock.history(start=start, end=end)
         return stock.history(period=period)
+
+    def getCurrentPrice(self, ticker: str, mic: str, simDate: str = None) -> float:
+        '''
+        Get current or historical price for a ticker.
+        
+        Args:
+            ticker: Stock ticker symbol (e.g., 'AAPL')
+            mic: Market Identifier Code (e.g., 'XNAS', 'XLON')
+            simDate: Optional date for historical price (YYYY-MM-DD). If None, uses latest.
+        
+        Returns:
+            Price as float. Returns 0.0 if unable to fetch.
+        '''
+        try:
+            micTicker = self.__getMicTicker(ticker, mic)
+            if simDate:
+                data = self.getStockData(micTicker, end=simDate)
+            else:
+                data = self.getStockData(micTicker, period='1d')
+            
+            if data is not None and len(data) > 0:
+                return float(data['Close'].iloc[-1])
+            else:
+                print(f"ERROR: No price data for {ticker} on {simDate}")
+                return 0.0
+        except Exception as e:
+            print(f"ERROR: Unable to fetch price for {ticker}: {e}")
+            return 0.0
 
     def placeShort(self, ticker, mic, quantity, accountId, simDate, strategyName=None, agentId=None):
         '''

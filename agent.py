@@ -650,18 +650,20 @@ class Agent:
     - Supports lifecycle control (pause/resume/stop)
     '''
 
-    def __init__(self, agentId: int, mic: str = 'XLON', preferredStrategy: Optional[str] = None, 
+    def __init__(self, agentId: int, accountId: int, mic: str = 'XLON', preferredStrategy: Optional[str] = None, 
                  bannedStrategies: List[str] = None):
         '''
         Initialize the agent.
         
         Args:
             agentId: Unique agent identifier
+            accountId: Trading account ID (for executing trades)
             mic: Market Identifier Code ('XNAS', 'XLON', 'XHKG', 'XJPX')
             preferredStrategy: Optional strategy to preferentially select
             bannedStrategies: List of strategy names to exclude from selection
         '''
         self.agentId = agentId
+        self.accountId = accountId
         self.mic = mic
         self.preferredStrategy = preferredStrategy
         self.bannedStrategies = bannedStrategies or []
@@ -680,7 +682,7 @@ class Agent:
         self._stopFlag = False
         self._lock = threading.Lock()
         
-        logger.info(f"Agent {agentId} initialized (MIC={mic})")
+        logger.info(f"Agent {agentId} initialized (accountId={accountId}, MIC={mic})")
     
     def _initializeStrategies(self) -> None:
         """Initialize all available strategies, respecting banned/preferred."""
@@ -817,48 +819,59 @@ class Agent:
             metrics = self.performanceTracker.getAllMetrics()
             selected_strategy_name = self.strategySelector.selectStrategy(metrics, self.totalTrades)
             selected_strategy = self.strategies[selected_strategy_name]
+            print(f"[Agent {self.agentId}] Selected strategy: {selected_strategy_name}")
         except Exception as e:
+            print(f"[Agent {self.agentId}] ERROR: Strategy selection failed - {e}")
             logger.error(f"Agent {self.agentId}: strategy selection failed: {e}")
             return
         
         # Get trade recommendation from strategy
         try:
             recommendation = selected_strategy.analyze(ticker, self.mic, simDate, exchange)
-            logger.info(f"Agent {self.agentId}: {selected_strategy_name} recommended {recommendation['action']} ({recommendation['confidence']:.1%} confidence)")
+            action_rec = recommendation.get('action', 'hold')
+            confidence_rec = recommendation.get('confidence', 0)
+            print(f"[Agent {self.agentId}] {selected_strategy_name} -> {action_rec.upper()} ({confidence_rec*100:.0f}% confidence)")
+            logger.info(f"Agent {self.agentId}: {selected_strategy_name} recommended {action_rec} ({confidence_rec:.1%} confidence)")
         except Exception as e:
+            print(f"[Agent {self.agentId}] ERROR: Strategy analysis failed - {e}")
             logger.error(f"Agent {self.agentId}: strategy.analyze() failed: {e}")
-            # Could fallback to another strategy here
             return
         
         # Execute trade if recommended (non-hold)
         action = recommendation.get('action', 'hold')
         if action == 'hold':
+            print(f"[Agent {self.agentId}] HOLD on {ticker}")
             logger.info(f"Agent {self.agentId}: HOLD (no action taken)")
             return
         
         try:
-            assets_to_trade = [{'ticker': ticker, 'quantity': recommendation.get('target_quantity', 1)}]
-            current_price = exchange.getCurrentPrice(ticker, self.mic)  # TODO: implement if not exists
-            prices = {ticker: current_price}
+            quantity = recommendation.get('targetQuantity', 1)
             
             if action == 'long':
-                exchange.placeLong(assets_to_trade, prices, strategyName=selected_strategy_name, agentId=self.agentId)
-                logger.info(f"Agent {self.agentId}: LONG {ticker} executed via {selected_strategy_name}")
+                print(f"[Agent {self.agentId}] EXECUTING LONG: {ticker} x{quantity}")
+                exchange.placeLong(ticker, self.mic, quantity, self.accountId, simDate, 
+                                 strategyName=selected_strategy_name, agentId=self.agentId)
+                print(f"[Agent {self.agentId}] SUCCESS: LONG {ticker} x{quantity} via {selected_strategy_name}")
+                logger.info(f"Agent {self.agentId}: LONG {ticker} x{quantity} executed via {selected_strategy_name}")
             elif action == 'short':
-                exchange.placeShort(assets_to_trade, prices, strategyName=selected_strategy_name, agentId=self.agentId)
-                logger.info(f"Agent {self.agentId}: SHORT {ticker} executed via {selected_strategy_name}")
+                print(f"[Agent {self.agentId}] EXECUTING SHORT: {ticker} x{quantity}")
+                exchange.placeShort(ticker, self.mic, quantity, self.accountId, simDate, 
+                                  strategyName=selected_strategy_name, agentId=self.agentId)
+                print(f"[Agent {self.agentId}] SUCCESS: SHORT {ticker} x{quantity} via {selected_strategy_name}")
+                logger.info(f"Agent {self.agentId}: SHORT {ticker} x{quantity} executed via {selected_strategy_name}")
             
             self.totalTrades += 1
             self._executionLog.append({
                 'strategy': selected_strategy_name,
                 'ticker': ticker,
                 'action': action,
-                'quantity': recommendation.get('target_quantity', 1),
+                'quantity': quantity,
                 'confidence': recommendation.get('confidence', 0),
                 'timestamp': simDate
             })
         
         except Exception as e:
+            print(f"[Agent {self.agentId}] ERROR: Trade execution failed - {e}")
             logger.error(f"Agent {self.agentId}: trade execution failed: {e}")
 
 
@@ -907,13 +920,14 @@ class AgentManager:
         logger.info(f"AgentManager: Initialized with {len(tickers)} tickers, "
                    f"date range {date_range[0]} to {date_range[1]}")
     
-    def addAgent(self, agentId: int, mic: str, preferredStrategy: Optional[str] = None,
+    def addAgent(self, agentId: int, accountId: int, mic: str, preferredStrategy: Optional[str] = None,
                 bannedStrategies: Optional[List[str]] = None) -> Agent:
         """
         Create and register a new agent.
         
         Args:
             agentId: Unique agent ID
+            accountId: Trading account ID for this agent
             mic: Market Identifier Code (e.g., 'XNAS')
             preferredStrategy: Optional preferred strategy name
             bannedStrategies: Optional list of strategy names to ban
@@ -928,12 +942,13 @@ class AgentManager:
             
             agent = Agent(
                 agentId=agentId,
+                accountId=accountId,
                 mic=mic,
                 preferredStrategy=preferredStrategy,
                 bannedStrategies=bannedStrategies
             )
             self.agents[agentId] = agent
-            logger.info(f"AgentManager: Added agent {agentId} (MIC={mic})")
+            logger.info(f"AgentManager: Added agent {agentId} (accountId={accountId}, MIC={mic})")
             return agent
     
     def removeAgent(self, agentId: int) -> bool:
@@ -1049,11 +1064,9 @@ class AgentManager:
                 # Auto-close aged shorts for all agents
                 for agent in self.agents.values():
                     try:
-                        # TODO: Get accountId for agent (needs to be tracked)
-                        # self.exchange.checkAndAutoCloseShorts(accountId, current_date_str)
-                        pass
+                        self.exchange.checkAndAutoCloseShorts(agent.accountId, current_date_str)
                     except Exception as e:
-                        logger.error(f"Error auto-closing shorts: {e}")
+                        logger.error(f"Error auto-closing shorts for agent {agent.agentId}: {e}")
                 
                 # Advance date
                 with self._lock:

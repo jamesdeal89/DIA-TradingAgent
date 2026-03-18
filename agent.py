@@ -177,14 +177,14 @@ class MeanReversionStrategy(TradingStrategy):
                 return {
                     'action': 'long',
                     'confidence': min(0.9, 0.5 + abs(z_score) * 0.15),
-                    'reason': f'Price {current_price:.2f} is {abs(z_score):.2f}σ below mean {mean_price:.2f}',
+                    'reason': f'Price {current_price:.2f} is {abs(z_score):.2f}sd below mean {mean_price:.2f}',
                     'targetQuantity': 1
                 }
             elif z_score > 2.0:  # Price is 2+ std devs above mean
                 return {
                     'action': 'short',
                     'confidence': min(0.9, 0.5 + abs(z_score) * 0.15),
-                    'reason': f'Price {current_price:.2f} is {abs(z_score):.2f}σ above mean {mean_price:.2f}',
+                    'reason': f'Price {current_price:.2f} is {abs(z_score):.2f}sd above mean {mean_price:.2f}',
                     'targetQuantity': 1
                 }
             else:
@@ -599,7 +599,7 @@ class StrategySelector:
         if random.random() < self.epsilon:
             # Explore: select random strategy
             selected = random.choice(availableStrategies)
-            logger.info(f"[StrategySelector] Exploration phase (ε={self.epsilon}): selected {selected}")
+            logger.info(f"[StrategySelector] Exploration phase (epsilon={self.epsilon}): selected {selected}")
         else:
             # Exploit: select highest profit factor
             bestStrategy = None
@@ -842,10 +842,10 @@ class Agent:
             prices = {ticker: current_price}
             
             if action == 'long':
-                exchange.placeLong(assets_to_trade, prices, strategy_name=selected_strategy_name, agent_id=self.agentId)
+                exchange.placeLong(assets_to_trade, prices, strategyName=selected_strategy_name, agentId=self.agentId)
                 logger.info(f"Agent {self.agentId}: LONG {ticker} executed via {selected_strategy_name}")
             elif action == 'short':
-                exchange.placeShort(assets_to_trade, prices, strategy_name=selected_strategy_name, agent_id=self.agentId)
+                exchange.placeShort(assets_to_trade, prices, strategyName=selected_strategy_name, agentId=self.agentId)
                 logger.info(f"Agent {self.agentId}: SHORT {ticker} executed via {selected_strategy_name}")
             
             self.totalTrades += 1

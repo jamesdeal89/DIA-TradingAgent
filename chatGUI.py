@@ -42,7 +42,6 @@ def runAgentTradeLoop(accountId, agentData, exchange):
     print(f"DEBUG: Trade loop started for agent {accountId} on {mic}")
     
     while agentData.get('threadRunning', True):
-        simDate = agentData.get('simDate')
         simSpeed = agentData.get('simSpeed', 1)
         
         if not agentData.get('threadActive', True):
@@ -51,8 +50,14 @@ def runAgentTradeLoop(accountId, agentData, exchange):
         
         try:
             agent = agentData['agent']
+            simDate = agent.simDate  
             print(f"DEBUG: Agent {accountId} timestep {timestep_count} on {simDate}")
             agent.runTimestep(exchange, simDate)
+            
+            # Auto-advance date
+            nextDate = (datetime.strptime(simDate, '%Y-%m-%d') + timedelta(days=simSpeed)).strftime('%Y-%m-%d')
+            agent.setSimDate(nextDate)
+            
             timestep_count += 1
         except Exception as e:
             print(f"DEBUG: Agent {accountId} timestep error - {e}")
@@ -166,25 +171,33 @@ def chatGUI():
             st.rerun()
 
         agentData = st.session_state.activeAgents.get(aId)
-        simDate = agentData.get('simDate', datetime.now().strftime('%Y-%m-%d')) if agentData else datetime.now().strftime('%Y-%m-%d')
+        # Read simDate directly from agent object to always stay in sync
+        simDate = agentData['agent'].simDate if agentData and 'agent' in agentData else datetime.now().strftime('%Y-%m-%d')
         simSpeed = agentData.get('simSpeed', 1) if agentData else 1
         threadActive = agentData.get('threadActive', True) if agentData else False
         
         st.title(f"Trading Agent {st.session_state.activeAgentId} Chat")
+
+        # Show notification only after user manually advances day.
+        advanceNoticeKey = f"simDateAdvanceNotice_{aId}"
+        if advanceNoticeKey in st.session_state:
+            st.info(f"Simulation date updated to {st.session_state[advanceNoticeKey]}")
+            del st.session_state[advanceNoticeKey]
         
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("Sim Date", simDate)
+            st.caption("Sim Speed")
+            st.write(f"{simSpeed}x")
         with col2:
-            st.metric("Sim Speed", f"{simSpeed}x")
-        with col3:
+            st.caption("Status")
             statusText = "ACTIVE" if threadActive else "PAUSED"
-            st.metric("Status", statusText)
-        with col4:
+            st.write(statusText)
+        with col3:
             if st.button("Advance 1 Day"):
-                nextDate = (datetime.strptime(simDate, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
-                st.session_state.activeAgents[aId]['simDate'] = nextDate
+                currentAgentDate = agentData['agent'].simDate
+                nextDate = (datetime.strptime(currentAgentDate, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
                 agentData['agent'].setSimDate(nextDate)
+                st.session_state[advanceNoticeKey] = nextDate
                 st.rerun()
         
         controlCol1, controlCol2, controlCol3 = st.columns(3)

@@ -15,13 +15,6 @@ from responseFormatter import ResponseFormatter
 
 load_dotenv()
 
-micTickerMap = {
-    'XNAS': ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'AMZN'],
-    'XLON': ['HSXA', 'BP', 'SHEL', 'ULVR', 'AZN'],
-    'XHKG': ['0700', '0388', '1113', '0005', '0011'],
-    'XJPX': ['7203', '6758', '9984', '6861', '8053']
-}
-
 # This decorator makes the function only run once.
 # The objects returned are stored in Streamlit's cache.
 @st.cache_resource
@@ -39,12 +32,14 @@ def initStockExchange():
     return StockExchange()
 
 def runAgentTradeLoop(accountId, agentData, exchange):
+    """
+    Background trading loop: at each timestep, agent analyzes all stocks in its market.
+    All strategy logic handled within agent.runTimestep().
+    """
     mic = agentData.get('mic', 'XNAS')
-    tickers = micTickerMap.get(mic, ['AAPL'])
-    tickerIndex = 0
-    iteration_count = 0
+    timestep_count = 0
     
-    print(f"DEBUG: Trade loop started for agent {accountId} on {mic} with tickers {tickers}")
+    print(f"DEBUG: Trade loop started for agent {accountId} on {mic}")
     
     while agentData.get('threadRunning', True):
         simDate = agentData.get('simDate')
@@ -56,13 +51,11 @@ def runAgentTradeLoop(accountId, agentData, exchange):
         
         try:
             agent = agentData['agent']
-            ticker = tickers[tickerIndex % len(tickers)]
-            print(f"DEBUG: Agent {accountId} iteration {iteration_count} trading {ticker} on {simDate}")
-            agent.runIteration(exchange, ticker, simDate)
-            tickerIndex += 1
-            iteration_count += 1
+            print(f"DEBUG: Agent {accountId} timestep {timestep_count} on {simDate}")
+            agent.runTimestep(exchange, simDate)
+            timestep_count += 1
         except Exception as e:
-            print(f"DEBUG: Agent {accountId} iteration error - {e}")
+            print(f"DEBUG: Agent {accountId} timestep error - {e}")
         
         sleep_seconds = 2.0 / simSpeed
         time.sleep(sleep_seconds)
@@ -151,7 +144,7 @@ def chatGUI():
             mic = st.selectbox("Market (MIC)", ["XLON", "XNAS", "XHKG", "XJPX"])
             prefStrategy = st.selectbox("Preferred strategy (optional)", ["None", "Sentiment", "MeanReversion", "Technical", "Fundamental"])
             banned = st.multiselect("Banned strategies (optional)", ["Sentiment", "MeanReversion", "Technical", "Fundamental"])
-            simDate = st.date_input("Simulation start date", value=datetime.now(), min_value=datetime(1990, 1, 1), max_value=datetime.now())
+            simDate = st.date_input("Simulation start date", value=datetime(2011, 1, 1), min_value=datetime(1990, 1, 1), max_value=datetime.now())
             simSpeed = st.selectbox("Simulation speed", [1, 5, 10, 20], format_func=lambda x: f"{x}x speed")
             if st.form_submit_button("Start Agent"):
                 simDateStr = simDate.strftime('%Y-%m-%d')
@@ -253,7 +246,7 @@ def chatGUI():
                     
                     elif intentLabel == "portfolio":
                         balance = exchange.checkBalance(agent.accountId) or 0
-                        portfolio = exchange.checkPortfolio(agent.accountId)
+                        portfolio = exchange.checkPortfolio(agent.accountId, agent.simDate)
                         portfolioDict = {}
                         if portfolio is not None and not portfolio.empty:
                             for _, row in portfolio.iterrows():

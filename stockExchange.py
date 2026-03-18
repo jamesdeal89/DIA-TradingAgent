@@ -127,6 +127,19 @@ class StockExchange:
         # .get() is used as it prevents exceptions if an MIC is passed which is not in suffix dict (like XNAS which has no suffix.)
         # Instead returns default value '' if no match in dict.
         return f"{ticker}{suffix.get(mic, '')}"
+    
+    def getMicTicker(self, ticker: str, mic: str) -> str:
+        '''
+        Public method: Convert bare ticker to yfinance-compatible ticker with MIC suffix.
+        
+        Args:
+            ticker: Bare ticker symbol (e.g., '0700', 'AAPL')
+            mic: Market Identifier Code (e.g., 'XNAS', 'XLON', 'XHKG', 'XJPX')
+        
+        Returns:
+            Suffixed ticker for yfinance (e.g., '0700.HK', 'AAPL')
+        '''
+        return self.__getMicTicker(ticker, mic)
 
     def initialiseAccount(self, accountId):
         '''
@@ -264,13 +277,13 @@ class StockExchange:
             print(f"ERROR: {e}")
             return None
 
-    def checkPortfolio(self, accountId):
+    def checkPortfolio(self, accountId, simDate):
         '''
         Returns a Pandas dataframe of all of the currently held positions.
         Includes held assets as well as open shorts. 
         Gracefully handles exceptions - returns None if failed for any reason.
         '''
-        # TODO: check if open shorts are 14 days old or more. if 14 days old (or older), close based on price at 14 days old.
+        self.checkAndAutoCloseShorts(accountId, simDate)
         query = "SELECT * FROM portfolios WHERE accountId = %s"
         cursor = self.connection.cursor()
         try:
@@ -335,7 +348,8 @@ class StockExchange:
         Returns 0 if succeeded, -1 if failed.
         '''
         # Get current price
-        price = self.getStockData(self.__getMicTicker(ticker, mic), end=simDate)['Close'].iloc[-1]
+        price = float(self.getStockData(self.__getMicTicker(ticker, mic), end=simDate)['Close'].iloc[-1])
+        quantity = float(quantity)
         cost_to_buyback = float(price * quantity)
         
         # Atomically: Check if open (closed IS FALSE), deduct quantity, and set closed=TRUE

@@ -153,7 +153,8 @@ class MeanReversionStrategy(TradingStrategy):
         """
         try:
             # Get 60 days of historical data leading up to simDate
-            data = exchange.getStockData(ticker, start=None, end=simDate)
+            suffixedTicker = exchange.getMicTicker(ticker, mic)
+            data = exchange.getStockData(suffixedTicker, start=None, end=simDate)
             
             if data is None or len(data) < 20:
                 return {
@@ -224,7 +225,8 @@ class TechnicalStrategy(TradingStrategy):
         """
         try:
             # Get 60+ days of data for indicator calculation
-            data = exchange.getStockData(ticker, start=None, end=simDate)
+            suffixedTicker = exchange.getMicTicker(ticker, mic)
+            data = exchange.getStockData(suffixedTicker, start=None, end=simDate)
             
             if data is None or len(data) < 14:
                 return {
@@ -342,7 +344,8 @@ class FundamentalStrategy(TradingStrategy):
         """
         try:
             # Get 60 days of data
-            data = exchange.getStockData(ticker, start=None, end=simDate)
+            suffixedTicker = exchange.getMicTicker(ticker, mic)
+            data = exchange.getStockData(suffixedTicker, start=None, end=simDate)
             
             if data is None or len(data) < 30:
                 return {
@@ -648,7 +651,24 @@ class Agent:
     - Selects strategies based on past profit factors
     - Provides query interface for GUI
     - Supports lifecycle control (pause/resume/stop)
+    - Analyzes all stocks in market at each timestep
     '''
+    
+    # Market Identifier Code to ticker mapping
+    MIC_TICKERS = {
+        'XNAS': ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'AMZN'],
+        'XLON': ['HSXA', 'BP', 'SHEL', 'ULVR', 'AZN'],
+        'XHKG': ['0700', '0388', '1113', '0005', '0011'],
+        'XJPX': ['7203', '6758', '9984', '6861', '8053']
+    }
+
+    # Market Identifier Code to ticker mapping
+    MIC_TICKERS = {
+        'XNAS': ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'AMZN'],
+        'XLON': ['HSXA', 'BP', 'SHEL', 'ULVR', 'AZN'],
+        'XHKG': ['0700', '0388', '1113', '0005', '0011'],
+        'XJPX': ['7203', '6758', '9984', '6861', '8053']
+    }
 
     def __init__(self, agentId: int, accountId: int, mic: str = 'XLON', preferredStrategy: Optional[str] = None, 
                  bannedStrategies: List[str] = None, simDate: str = None):
@@ -737,6 +757,139 @@ class Agent:
         """Check if agent is paused."""
         with self._lock:
             return self._pauseFlag
+    
+    # EXECUTION: TIMESTEP (ALL STOCKS)
+    
+    def runTimestep(self, exchange, simDate: str = None) -> None:
+        '''
+        Execute one timestep of the trading loop: analyze and trade ALL stocks in the agent's market.
+        
+        Called by background thread to process all tickers for the agent's MIC simultaneously.
+        1. Get all tickers for agent's MIC
+        2. For each ticker, select strategy and execute trade if recommended
+        3. Log execution
+        
+        Args:
+            exchange: StockExchange instance for trade execution and data access
+            simDate: Current simulation date (YYYY-MM-DD). If None, uses agent.simDate
+        '''
+        if simDate is None:
+            simDate = self.simDate
+        
+        # Check lifecycle flags
+        with self._lock:
+            if self._stopFlag:
+                logger.info(f"Agent {self.agentId}: stop_flag set, skipping timestep")
+                return
+            
+            if self._pauseFlag:
+                logger.debug(f"Agent {self.agentId}: paused, skipping timestep")
+                return
+        
+        # Initialize strategies if not already done
+        if not self.strategies:
+            self._initializeStrategies()
+        
+        # Get all tickers for this market
+        tickers = self.MIC_TICKERS.get(self.mic, [])
+        if not tickers:
+            logger.warning(f"Agent {self.agentId}: No tickers found for MIC {self.mic}")
+            return
+        
+        print(f"[Agent {self.agentId}] Timestep {simDate} on {self.mic}: analyzing {len(tickers)} stocks")
+        
+        # Analyze and trade each stock in sequence
+        for ticker in tickers:
+            try:
+                self._analyzeAndTrade(exchange, ticker, simDate)
+            except Exception as e:
+                print(f"[Agent {self.agentId}] ERROR processing {ticker}: {e}")
+                logger.error(f"Agent {self.agentId}: failed to process {ticker}: {e}")
+    
+    def _analyzeAndTrade(self, exchange, ticker: str, simDate: str) -> None:
+        '''
+        Internal method: analyze a single ticker and execute trade if recommended.
+        
+        Args:
+            exchange: StockExchange instance
+            ticker: Stock ticker symbol
+            simDate: Current simulation date (YYYY-MM-DD)
+        '''
+        # Select strategy based on performance
+        try:
+            metrics = self.performanceTracker.getAllMetrics()
+            selected_strategy_name = self.strategySelector.selectStrategy(metrics, self.totalTrades)
+            selected_strategy = self.strategies[selected_strategy_name]
+        except Exception as e:
+            print(f"[Agent {self.agentId}] ERROR: Strategy selection failed - {e}")
+            logger.error(f"Agent {self.agentId}: strategy selection failed: {e}")
+            return
+        
+        # Get trade recommendation from strategy
+        try:
+            recommendation = selected_strategy.analyze(ticker, self.mic, simDate, exchange)
+            action_rec = recommendation.get('action', 'hold')
+            confidence_rec = recommendation.get('confidence', 0)
+            print(f"[Agent {self.agentId}] {ticker}: {selected_strategy_name} -> {action_rec.upper()} ({confidence_rec*100:.0f}%)")
+            logger.info(f"Agent {self.agentId}: {ticker} {selected_strategy_name} recommended {action_rec} ({confidence_rec:.1%})")
+        except Exception as e:
+            print(f"[Agent {self.agentId}] ERROR: Strategy analysis failed for {ticker} - {e}")
+            logger.error(f"Agent {self.agentId}: strategy.analyze({ticker}) failed: {e}")
+            return
+        
+        # Execute trade if recommended (non-hold)
+        action = recommendation.get('action', 'hold')
+        if action == 'hold':
+            logger.debug(f"Agent {self.agentId}: HOLD on {ticker}")
+            return
+        
+        # Execute buy/short
+        try:
+            target_quantity = recommendation.get('targetQuantity', 0)
+            self.executeAction(exchange, ticker, action, target_quantity, simDate, selected_strategy_name)
+        except Exception as e:
+            print(f"[Agent {self.agentId}] ERROR: Trade execution failed for {ticker} - {e}")
+            logger.error(f"Agent {self.agentId}: executeAction({ticker}) failed: {e}")
+    
+    def executeAction(self, exchange, ticker: str, action: str, quantity: int, simDate: str, strategyName: str) -> None:
+        '''
+        Execute a trade action (LONG or SHORT).
+        
+        Args:
+            exchange: StockExchange instance
+            ticker: Stock ticker symbol
+            action: Trade action ('long' or 'short')
+            quantity: Number of shares to trade
+            simDate: Current simulation date (YYYY-MM-DD)
+            strategyName: Name of strategy recommending the trade
+        '''
+        try:
+            if action == 'long':
+                print(f"[Agent {self.agentId}] EXECUTING LONG: {ticker} x{quantity}")
+                exchange.placeLong(ticker, self.mic, quantity, self.accountId, simDate, 
+                                 strategyName=strategyName, agentId=self.agentId)
+                print(f"[Agent {self.agentId}] SUCCESS: LONG {ticker} x{quantity} via {strategyName}")
+                logger.info(f"Agent {self.agentId}: LONG {ticker} x{quantity} executed via {strategyName}")
+            elif action == 'short':
+                print(f"[Agent {self.agentId}] EXECUTING SHORT: {ticker} x{quantity}")
+                exchange.placeShort(ticker, self.mic, quantity, self.accountId, simDate, 
+                                  strategyName=strategyName, agentId=self.agentId)
+                print(f"[Agent {self.agentId}] SUCCESS: SHORT {ticker} x{quantity} via {strategyName}")
+                logger.info(f"Agent {self.agentId}: SHORT {ticker} x{quantity} executed via {strategyName}")
+            
+            self.totalTrades += 1
+            self._executionLog.append({
+                'strategy': strategyName,
+                'ticker': ticker,
+                'action': action,
+                'quantity': quantity,
+                'confidence': 0,
+                'timestamp': simDate
+            })
+        except Exception as e:
+            print(f"[Agent {self.agentId}] TRADE ERROR: {action} {ticker} failed - {e}")
+            logger.error(f"Agent {self.agentId}: {action} {ticker} execution failed: {e}")
+            raise
     
     # QUERY INTERFACE FOR GUI
     

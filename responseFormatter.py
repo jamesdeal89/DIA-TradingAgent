@@ -26,20 +26,21 @@ class ResponseFormatter:
             return f"Your portfolio is empty. Current balance: ${balance:,.2f}"
         
         lines = [f"Portfolio Summary (Cash Balance: ${balance:,.2f})"]
-        lines.append("-" * 50)
+        lines.append("=" * 50)
         
-        total_value = balance
         for ticker, positions in portfolio.items():
             long_qty = positions.get('long', 0)
             short_qty = positions.get('short', 0)
             
             if long_qty > 0:
                 entry_price = positions.get('longEntryPrice', 0)
-                lines.append(f"  LONG: {ticker} x{long_qty} @ ${entry_price:.2f}")
+                lines.append(f"\nLONG: {ticker} x{long_qty} @ ${entry_price:.2f}")
             
             if short_qty > 0:
                 entry_price = positions.get('shortEntryPrice', 0)
-                lines.append(f"  SHORT: {ticker} x{short_qty} @ ${entry_price:.2f}")
+                lines.append(f"SHORT: {ticker} x{short_qty} @ ${entry_price:.2f}")
+            
+            lines.append("-" * 50)
         
         return "\n".join(lines)
     

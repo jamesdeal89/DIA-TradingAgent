@@ -8,6 +8,7 @@ import json
 from datetime import datetime, timedelta
 import threading
 import time
+import uuid
 from agent import Agent
 from stockExchange import StockExchange
 from responseFormatter import ResponseFormatter
@@ -16,9 +17,9 @@ load_dotenv()
 
 micTickerMap = {
     'XNAS': ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'AMZN'],
-    'XLON': ['HSX.L', 'BP.L', 'SHELL.L', 'UNILEVER.L', 'AZN.L'],
-    'XHKG': ['0700.HK', '0388.HK', '1399.HK', '0005.HK', '0011.HK'],
-    'XJPX': ['7203.T', '6758.T', '9984.T', '6861.T', '8054.T']
+    'XLON': ['HSXA', 'BP', 'SHEL', 'ULVR', 'AZN'],
+    'XHKG': ['0700', '0388', '1113', '0005', '0011'],
+    'XJPX': ['7203', '6758', '9984', '6861', '8053']
 }
 
 # This decorator makes the function only run once.
@@ -72,7 +73,11 @@ def startAgent(mic, prefStrategy, bannedList, simDate=None, simSpeed=1):
     exchange = initStockExchange()
     
     try:
-        accountId = 10000 + len(st.session_state.get('activeAgents', {}))
+        if 'activeAgents' not in st.session_state:
+            st.session_state.activeAgents = {}
+        
+        accountId = int(time.time() * 1000000) % 1000000000
+        
         exchange.initialiseAccount(accountId)
         
         preferred = prefStrategy if prefStrategy and prefStrategy != "None" else None
@@ -86,9 +91,6 @@ def startAgent(mic, prefStrategy, bannedList, simDate=None, simSpeed=1):
             bannedStrategies=bannedList,
             simDate=simDate
         )
-        
-        if 'activeAgents' not in st.session_state:
-            st.session_state.activeAgents = {}
         
         st.session_state.activeAgents[accountId] = {
             'agent': agent,

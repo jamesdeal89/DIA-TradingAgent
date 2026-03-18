@@ -5,6 +5,9 @@ from mysql.connector import Error
 import os
 from dotenv import load_dotenv
 import json
+from datetime import datetime, timedelta
+import threading
+import time
 from agent import Agent
 from stockExchange import StockExchange
 from responseFormatter import ResponseFormatter
@@ -27,7 +30,34 @@ def getRunningAgents():
 def initStockExchange():
     return StockExchange()
 
-def startAgent(mic, prefStrategy, bannedList):
+def runAgentTradeLoop(accountId, agentData, exchange):
+    ticker = "AAPL"
+    iteration_count = 0
+    
+    print(f"DEBUG: Trade loop started for agent {accountId}")
+    
+    while agentData.get('threadRunning', True):
+        simDate = agentData.get('simDate')
+        simSpeed = agentData.get('simSpeed', 1)
+        
+        if not agentData.get('threadActive', True):
+            time.sleep(0.5)
+            continue
+        
+        try:
+            agent = agentData['agent']
+            print(f"DEBUG: Agent {accountId} iteration {iteration_count} on {simDate}")
+            agent.runIteration(exchange, ticker, simDate)
+            iteration_count += 1
+        except Exception as e:
+            print(f"DEBUG: Agent {accountId} iteration error - {e}")
+        
+        sleep_seconds = 2.0 / simSpeed
+        time.sleep(sleep_seconds)
+    
+    print(f"DEBUG: Trade loop ended for agent {accountId}")
+
+def startAgent(mic, prefStrategy, bannedList, simDate=None, simSpeed=1):
     exchange = initStockExchange()
     
     try:
@@ -35,12 +65,15 @@ def startAgent(mic, prefStrategy, bannedList):
         exchange.initialiseAccount(accountId)
         
         preferred = prefStrategy if prefStrategy and prefStrategy != "None" else None
+        if simDate is None:
+            simDate = datetime.now().strftime('%Y-%m-%d')
         agent = Agent(
             agentId=accountId,
             accountId=accountId,
             mic=mic,
             preferredStrategy=preferred,
-            bannedStrategies=bannedList
+            bannedStrategies=bannedList,
+            simDate=simDate
         )
         
         if 'activeAgents' not in st.session_state:
@@ -50,9 +83,23 @@ def startAgent(mic, prefStrategy, bannedList):
             'agent': agent,
             'mic': mic,
             'prefStrategy': preferred,
-            'banned': bannedList
+            'banned': bannedList,
+            'simDate': simDate,
+            'simSpeed': simSpeed,
+            'threadRunning': True,
+            'threadActive': True
         }
         
+        agentData = st.session_state.activeAgents[accountId]
+        tradeThread = threading.Thread(
+            target=runAgentTradeLoop,
+            args=(accountId, agentData, exchange),
+            daemon=True
+        )
+        agentData['thread'] = tradeThread
+        tradeThread.start()
+        
+        print(f"DEBUG: Agent {accountId} started with simDate={simDate}, simSpeed={simSpeed}x, thread running")
         return accountId
     except Exception as e:
         print(f'Error starting agent: {e}')
@@ -91,10 +138,13 @@ def chatGUI():
             mic = st.selectbox("Market (MIC)", ["XLON", "XNAS", "XHKG", "XJPX"])
             prefStrategy = st.selectbox("Preferred strategy (optional)", ["None", "Sentiment", "MeanReversion", "Technical", "Fundamental"])
             banned = st.multiselect("Banned strategies (optional)", ["Sentiment", "MeanReversion", "Technical", "Fundamental"])
+            simDate = st.date_input("Simulation start date", value=datetime.now())
+            simSpeed = st.selectbox("Simulation speed", [1, 5, 10, 20], format_func=lambda x: f"{x}x speed")
             if st.form_submit_button("Start Agent"):
-                accountId = startAgent(mic, prefStrategy, banned)
+                simDateStr = simDate.strftime('%Y-%m-%d')
+                accountId = startAgent(mic, prefStrategy, banned, simDateStr, simSpeed)
                 if accountId:
-                    st.success(f"Agent created with account ID: {accountId}")
+                    st.success(f"Agent created with account ID: {accountId} (simDate: {simDateStr}, speed: {simSpeed}x)")
                     st.rerun()
                 else:
                     st.error("Failed to create agent")
@@ -109,7 +159,45 @@ def chatGUI():
             st.session_state.activeAgentId = None
             st.rerun()
 
-        st.title(f"Trading Agent{st.session_state.activeAgentId} Chat")
+        agentData = st.session_state.activeAgents.get(aId)
+        simDate = agentData.get('simDate', datetime.now().strftime('%Y-%m-%d')) if agentData else datetime.now().strftime('%Y-%m-%d')
+        simSpeed = agentData.get('simSpeed', 1) if agentData else 1
+        threadActive = agentData.get('threadActive', True) if agentData else False
+        
+        st.title(f"Trading Agent {st.session_state.activeAgentId} Chat")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Sim Date", simDate)
+        with col2:
+            st.metric("Sim Speed", f"{simSpeed}x")
+        with col3:
+            statusText = "ACTIVE" if threadActive else "PAUSED"
+            st.metric("Status", statusText)
+        with col4:
+            if st.button("Advance 1 Day"):
+                nextDate = (datetime.strptime(simDate, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
+                st.session_state.activeAgents[aId]['simDate'] = nextDate
+                agentData['agent'].setSimDate(nextDate)
+                st.rerun()
+        
+        controlCol1, controlCol2, controlCol3 = st.columns(3)
+        with controlCol1:
+            if st.button("Pause" if threadActive else "Resume", key="pauseResumeBtn"):
+                st.session_state.activeAgents[aId]['threadActive'] = not threadActive
+                st.rerun()
+        with controlCol2:
+            if st.button("Stop Trading"):
+                st.session_state.activeAgents[aId]['threadRunning'] = False
+                time.sleep(0.5)
+                st.info("Agent trading stopped. Back to dashboard to restart.")
+        with controlCol3:
+            if st.button("Clear Messages"):
+                st.session_state[messagesKey] = []
+                st.rerun()
+        
+        st.divider()
+        
         # Initialise a chat history.
         if messagesKey not in st.session_state:
             st.session_state[messagesKey] = []
@@ -168,6 +256,17 @@ def chatGUI():
                                         portfolioDict[ticker]['short'] = row.get('quantity', 0)
                                         portfolioDict[ticker]['shortEntryPrice'] = row.get('priceAtShort', 0)
                         response = ResponseFormatter.formatPortfolioSummary(portfolioDict, balance)
+                    
+                    elif intentLabel == "execute" or intentLabel == "trade":
+                        ticker = "AAPL"
+                        currentSimDate = agentData.get('simDate')
+                        print(f"DEBUG: Executing agent iteration for ticker={ticker}, simDate={currentSimDate}")
+                        try:
+                            agent.runIteration(exchange, ticker, currentSimDate)
+                            response = f"Trade iteration executed for {ticker} on {currentSimDate}. Check portfolio for results."
+                        except Exception as e:
+                            print(f"DEBUG: Trade execution error - {e}")
+                            response = f"Error executing trade: {str(e)}"
 
             # Bot response
             with st.chat_message("assistant"):

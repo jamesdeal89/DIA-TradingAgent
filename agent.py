@@ -651,7 +651,7 @@ class Agent:
     '''
 
     def __init__(self, agentId: int, accountId: int, mic: str = 'XLON', preferredStrategy: Optional[str] = None, 
-                 bannedStrategies: List[str] = None):
+                 bannedStrategies: List[str] = None, simDate: str = None):
         '''
         Initialize the agent.
         
@@ -661,12 +661,14 @@ class Agent:
             mic: Market Identifier Code ('XNAS', 'XLON', 'XHKG', 'XJPX')
             preferredStrategy: Optional strategy to preferentially select
             bannedStrategies: List of strategy names to exclude from selection
+            simDate: Initial simulation date (YYYY-MM-DD format)
         '''
         self.agentId = agentId
         self.accountId = accountId
         self.mic = mic
         self.preferredStrategy = preferredStrategy
         self.bannedStrategies = bannedStrategies or []
+        self.simDate = simDate
         
         # Performance / strategy management
         self.performanceTracker = PerformanceTracker(windowSize=50)
@@ -682,7 +684,7 @@ class Agent:
         self._stopFlag = False
         self._lock = threading.Lock()
         
-        logger.info(f"Agent {agentId} initialized (accountId={accountId}, MIC={mic})")
+        logger.info(f"Agent {agentId} initialized (accountId={accountId}, MIC={mic}, simDate={simDate})")
     
     def _initializeStrategies(self) -> None:
         """Initialize all available strategies, respecting banned/preferred."""
@@ -781,7 +783,17 @@ class Agent:
     
     # MAIN ITERATION LOOP 
     
-    def runIteration(self, exchange, ticker: str, simDate: str) -> None:
+    def setSimDate(self, simDate: str) -> None:
+        '''
+        Update the current simulation date for the agent.
+        
+        Args:
+            simDate: New simulation date (YYYY-MM-DD)
+        '''
+        self.simDate = simDate
+        print(f"DEBUG: Agent {self.agentId} simDate updated to {self.simDate}")
+    
+    def runIteration(self, exchange, ticker: str, simDate: str = None) -> None:
         '''
         Execute one iteration of the trading loop.
         
@@ -795,11 +807,14 @@ class Agent:
         Args:
             exchange: StockExchange instance for trade execution and data access
             ticker: Stock ticker to trade
-            simDate: Current simulation date (YYYY-MM-DD)
+            simDate: Current simulation date (YYYY-MM-DD). If None, uses agent.simDate
         
         NOTE: yFinance rate-limit: best to use 2s wait between requests.
         For backtesting, use larger date skips (e.g., weekly instead of daily).
         '''
+        if simDate is None:
+            simDate = self.simDate
+        
         # Check lifecycle flags
         with self._lock:
             if self._stopFlag:

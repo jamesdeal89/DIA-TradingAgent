@@ -36,9 +36,9 @@ class ResponseFormatter:
         total_standing = float(balance) + total_holdings_value
         
         lines = []
-        lines.append(f"Total Standing: ${total_standing:,.2f}")
-        lines.append(f"Cash: ${balance:,.2f}")
-        lines.append(f"Holdings Value: ${total_holdings_value:,.2f}")
+        lines.append(f"Total Standing: ${total_standing:,.2f}\n")
+        lines.append(f"Cash: ${balance:,.2f}\n")
+        lines.append(f"Holdings Value: ${total_holdings_value:,.2f}\n")
         lines.append("")
         
         # Markdown table header

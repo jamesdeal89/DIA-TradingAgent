@@ -232,7 +232,6 @@ def getBearishThreshold(sentimentMetrics: Dict[str, Any], strict: bool = False) 
     return sentimentMetrics['avgSentiment'] < threshold
 
 
-# Convenience wrapper for common agent use cases
 class SentimentAnalyser:
     """
     Convenience wrapper for sentiment analysis in agents.

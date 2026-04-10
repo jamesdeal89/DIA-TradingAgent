@@ -15,8 +15,6 @@ from responseFormatter import ResponseFormatter
 
 load_dotenv()
 
-# This decorator makes the function only run once.
-# The objects returned are stored in Streamlit's cache.
 @st.cache_resource
 def initialiseNLP():
     intents = nlp.readIntentsCSV()
@@ -84,7 +82,6 @@ def runAgentTradeLoop(accountId, agentData, exchange):
             # Auto-advance date (skip in realtime mode)
             if not isRealtimeMode:
                 # Advance by decision period
-                # This naturally spaces out timesteps based on decision period
                 decisionPeriod = agent.getDecisionPeriod()
                 nextDate = (datetime.strptime(simDate, '%Y-%m-%d') + timedelta(days=decisionPeriod)).strftime('%Y-%m-%d')
                 agent.setSimDate(nextDate)
@@ -157,12 +154,8 @@ def startAgent(mic, prefStrategy, bannedList, simDate=None, decisionPeriod=1, is
         return None
 
 
-# Runs for any GUI refresh event, e.g. initial load, input, UI interaction.
 def chatGUI():
-    # Loads cached NLP objects (cached due to decorator on initialiseNLP())
     indexWithNorms, countVect, tfTransformer, intents = initialiseNLP()
-
-    # States for navigation.
     if "activeAgentId" not in st.session_state:
         st.session_state.activeAgentId = None
 
@@ -288,9 +281,39 @@ def chatGUI():
         for message in st.session_state[messagesKey]:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
+                
+                # Re-render performance charts if this was a performance response
+                if message.get("type") == "performance" and message["role"] == "ai":
+                    agentData = st.session_state.activeAgents.get(aId)
+                    if agentData:
+                        agent = agentData['agent']
+                        chart_data = ResponseFormatter.formatPerformanceChartData(
+                            agent.performanceTracker, exchange, agent.accountId
+                        )
+                        
+                        if chart_data['hasData']:
+                            # Portfolio value over time
+                            if chart_data['portfolioValue']:
+                                import pandas as pd
+                                portfolio_df = pd.DataFrame([
+                                    {'Date': k, 'Portfolio Value': v}
+                                    for k, v in chart_data['portfolioValue'].items()
+                                ])
+                                st.line_chart(portfolio_df.set_index('Date'))
+                                st.caption("Portfolio Value Over Time")
+                            
+                            # Strategy-specific P&L
+                            if chart_data['strategyPnL']:
+                                st.markdown("#### Strategy-Specific Cumulative P&L")
+                                import pandas as pd
+                                for strategy, pnl_dict in chart_data['strategyPnL'].items():
+                                    strategy_df = pd.DataFrame([
+                                        {'Date': k, 'Cumulative P&L': v}
+                                        for k, v in pnl_dict.items()
+                                    ])
+                                    st.line_chart(strategy_df.set_index('Date'))
+                                    st.caption(f"{strategy}")
 
-        # Take the user's prompt.
-        # The ':=' is an operator that assigns the input to the prompt variable and checks if its not None at once.
         if prompt := st.chat_input("Enter your prompt..."):
             with st.chat_message("user"):
                 st.markdown(prompt)
@@ -311,12 +334,60 @@ def chatGUI():
                     agent = agentData['agent']
                     
                     if intentLabel == "performance":
-                        metrics = agent.performanceTracker.getAllMetrics()
-                        response = ResponseFormatter.formatStrategyPerformance(metrics)
+                        # Display portfolio value and performance charts
+                        st.markdown("### Performance Metrics")
+                        
+                        # Get chart data
+                        chart_data = ResponseFormatter.formatPerformanceChartData(
+                            agent.performanceTracker, exchange, agent.accountId
+                        )
+                        
+                        # Store performance display info in session state
+                        performance_summary = f"Performance data retrieved at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                        st.session_state[messagesKey].append({"role": "ai", "content": performance_summary, "type": "performance"})
+                        
+                        if chart_data['hasData']:
+                            # Portfolio value over time
+                            if chart_data['portfolioValue']:
+                                import pandas as pd
+                                portfolio_df = pd.DataFrame([
+                                    {'Date': k, 'Portfolio Value': v}
+                                    for k, v in chart_data['portfolioValue'].items()
+                                ])
+                                st.line_chart(portfolio_df.set_index('Date'))
+                                st.caption("Portfolio Value Over Time")
+                            
+                            # Strategy-specific P&L
+                            if chart_data['strategyPnL']:
+                                st.markdown("#### Strategy-Specific Cumulative P&L")
+                                import pandas as pd
+                                for strategy, pnl_dict in chart_data['strategyPnL'].items():
+                                    strategy_df = pd.DataFrame([
+                                        {'Date': k, 'Cumulative P&L': v}
+                                        for k, v in pnl_dict.items()
+                                    ])
+                                    st.line_chart(strategy_df.set_index('Date'))
+                                    st.caption(f"{strategy}")
+                        else:
+                            st.info("No performance data yet. Run the simulation to generate trading results.")
+                    
+                    elif intentLabel == "strategy":
+                        # Display strategy ranking and comparison
+                        response = ResponseFormatter.formatStrategyComparison(agent.performanceTracker, agent._executionLog)
+                        
+                        # Display in chat
+                        with st.chat_message("assistant"):
+                            st.markdown(response)
+                        st.session_state[messagesKey].append({"role": "ai", "content": response})
                     
                     elif intentLabel == "actions":
                         recentTrades = agent._executionLog
                         response = ResponseFormatter.formatRecentTrades(recentTrades, limit=10)
+                        
+                        # Display response
+                        with st.chat_message("assistant"):
+                            st.markdown(response)
+                        st.session_state[messagesKey].append({"role": "ai", "content": response})
                     
                     elif intentLabel == "portfolio":
                         balance = exchange.checkBalance(agent.accountId) or 0
@@ -353,11 +424,29 @@ def chatGUI():
                                         portfolioDict[ticker]['shortEntryPrice'] = entry_price
                                         portfolioDict[ticker]['shortCurrentPrice'] = current_price
                         response = ResponseFormatter.formatPortfolioSummary(portfolioDict, balance)
-
-            # Bot response
-            with st.chat_message("assistant"):
-                st.markdown(response)
-            st.session_state[messagesKey].append({"role": "ai", "content": response})
+                        
+                        # Display response
+                        with st.chat_message("assistant"):
+                            st.markdown(response)
+                        st.session_state[messagesKey].append({"role": "ai", "content": response})
+                    
+                    else:
+                        # Fallback response for unmatched intents
+                        with st.chat_message("assistant"):
+                            st.markdown(response)
+                        st.session_state[messagesKey].append({"role": "ai", "content": response})
+            
+            else:
+                # No agent found
+                with st.chat_message("assistant"):
+                    st.markdown(response)
+                st.session_state[messagesKey].append({"role": "ai", "content": response})
+            
+            if not match:
+                # No intent match
+                with st.chat_message("assistant"):
+                    st.markdown(response)
+                st.session_state[messagesKey].append({"role": "ai", "content": response})
 
 
 if __name__ == "__main__":

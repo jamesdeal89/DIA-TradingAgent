@@ -81,6 +81,16 @@ class StockExchange:
                  "confidence FLOAT, "
                  "INDEX idx_ticker_date (ticker, date))")
         self.__executeDatabaseQuery(query)
+
+        query = ("CREATE TABLE IF NOT EXISTS portfolio_history ("
+                 "accountId INT, "
+                 "snapshotDate DATE, "
+                 "cashBalance DECIMAL(32,2), "
+                 "portfolioValue DECIMAL(32,2), "
+                 "totalValue DECIMAL(32,2), "
+                 "agentId INT, "
+                 "UNIQUE KEY (accountId, snapshotDate))")
+        self.__executeDatabaseQuery(query)
         
     def __createServerConnection(self):
         '''
@@ -111,7 +121,6 @@ class StockExchange:
                 cursor.execute(query)
             self.connection.commit()
             print("Database query executed.")
-            # Useful to check if updates worked.
             return cursor.rowcount
         except Error as e:
             print(f'Error: {e}')
@@ -299,12 +308,24 @@ class StockExchange:
 
         return result
 
-    def sellLong(self, accountId, ticker, mic, quantity, simDate):
+    def sellLong(self, accountId, ticker, mic, quantity, simDate, strategyName=None, entryPrice=None, entryDate=None):
         '''
         Sell a held portfolio asset at current market price.
         Atomic operation - will only succeed if account has sufficient quantity.
         If quantity becomes 0, removes the position record to keep DB clean.
-        Returns 0 on success, -1 on failure.
+        
+        Args:
+            accountId: Account ID selling the position
+            ticker: Stock ticker symbol
+            mic: Market Identifier Code
+            quantity: Number of shares to sell
+            simDate: Current simulation date (YYYY-MM-DD)
+            strategyName: Name of strategy that opened the original position (for performance tracking)
+            entryPrice: Price at which position was opened (for P&L calculation)
+            entryDate: Date when position was opened (for duration tracking)
+        
+        Returns:
+            0 on success, -1 on failure
         '''
         # Get current price.
         price = self.getStockData(self.__getMicTicker(ticker, mic), end=simDate)['Close'].iloc[-1]
@@ -322,9 +343,9 @@ class StockExchange:
             self.__executeDatabaseQuery(query, (proceeds, accountId))
             
             # Log the trade
-            query = "INSERT INTO trades (accountId, ticker, mic, tradeType, quantity, price, timestamp) " \
-                    "VALUES (%s, %s, %s, 'sell', %s, %s, %s)"
-            self.__executeDatabaseQuery(query, (accountId, ticker, mic, quantity, price, simDate))
+            query = "INSERT INTO trades (accountId, ticker, mic, tradeType, quantity, price, timestamp, strategyName) " \
+                    "VALUES (%s, %s, %s, 'sell', %s, %s, %s, %s)"
+            self.__executeDatabaseQuery(query, (accountId, ticker, mic, quantity, price, simDate, strategyName))
             
             # Clean up zero-quantity positions
             query = "DELETE FROM portfolios " \
@@ -332,6 +353,20 @@ class StockExchange:
             self.__executeDatabaseQuery(query, (accountId, ticker))
             
             print(f"Sold {quantity} of {ticker} at {price}. Proceeds: {proceeds}")
+            
+            # Record P&L for performance tracking if strategy info is available
+            if self.performanceTracker and strategyName and entryPrice is not None and entryDate:
+                self.recordTradePnL(
+                    accountId,
+                    strategyName,
+                    entryPrice=entryPrice,
+                    exitPrice=price,
+                    quantity=quantity,
+                    ticker=ticker,
+                    entryDate=entryDate,
+                    exitDate=simDate
+                )
+            
             return 0
         else:
             print(f"ERROR: Insufficient quantity of {ticker} to sell.")
@@ -705,6 +740,97 @@ class StockExchange:
             print(f"ERROR: Invalid date format {simDate}. Expected YYYY-MM-DD.")
             return False
 
+    def logPortfolioSnapshot(self, accountId: int, agentId: int, simDate: str) -> bool:
+        """
+        Log current portfolio value snapshot to portfolio_history table.
+        Call this once per decision period to track portfolio equity growth.
+        
+        Args:
+            accountId: Account ID to snapshot
+            agentId: Agent ID
+            simDate: Snapshot date (YYYY-MM-DD)
+        
+        Returns:
+            True if successful, False if error
+        """
+        try:
+            # Get current cash balance
+            cash_balance = self.checkBalance(accountId) or 0
+            
+            # Get open positions and calculate market value
+            portfolio_df = self.checkPortfolio(accountId, simDate)
+            portfolio_value = 0.0
+            
+            if portfolio_df is not None and not portfolio_df.empty:
+                for _, row in portfolio_df.iterrows():
+                    ticker = row.get('ticker')
+                    mic = row.get('mic')
+                    qty = float(row.get('quantity', 0))
+                    trade_type = row.get('tradeType')
+                    
+                    if ticker and qty > 0:
+                        try:
+                            current_price = self.getCurrentPrice(ticker, mic, simDate)
+                            if trade_type == 'long':
+                                portfolio_value += current_price * qty
+                            elif trade_type == 'short':
+                                portfolio_value -= current_price * qty
+                        except:
+                            pass  # Skip if price fetch fails
+            
+            total_value = float(cash_balance) + portfolio_value
+            
+            # Log to portfolio_history
+            cursor = self.connection.cursor()
+            query = ("INSERT INTO portfolio_history (accountId, snapshotDate, cashBalance, "
+                     "portfolioValue, totalValue, agentId) "
+                     "VALUES (%s, %s, %s, %s, %s, %s) "
+                     "ON DUPLICATE KEY UPDATE "
+                     "cashBalance = VALUES(cashBalance), "
+                     "portfolioValue = VALUES(portfolioValue), "
+                     "totalValue = VALUES(totalValue)")
+            
+            cursor.execute(query, (accountId, simDate, float(cash_balance), 
+                                  portfolio_value, total_value, agentId))
+            self.connection.commit()
+            
+            return True
+        except Exception as e:
+            print(f"ERROR logging portfolio snapshot: {e}")
+            return False
+
+    def getPortfolioHistory(self, accountId: int, startDate: str = None, 
+                           endDate: str = None) -> pd.DataFrame:
+        """
+        Retrieve portfolio history snapshots for an account.
+        
+        Args:
+            accountId: Account ID
+            startDate: Optional start date (YYYY-MM-DD)
+            endDate: Optional end date (YYYY-MM-DD)
+        
+        Returns:
+            DataFrame with columns: snapshotDate, cashBalance, portfolioValue, totalValue
+        """
+        try:
+            query = "SELECT snapshotDate, cashBalance, portfolioValue, totalValue FROM portfolio_history WHERE accountId = %s"
+            params = [accountId]
+            
+            if startDate:
+                query += " AND snapshotDate >= %s"
+                params.append(startDate)
+            
+            if endDate:
+                query += " AND snapshotDate <= %s"
+                params.append(endDate)
+            
+            query += " ORDER BY snapshotDate ASC"
+            
+            return pd.read_sql(query, self.connection, params=params)
+        except Exception as e:
+            print(f"ERROR retrieving portfolio history: {e}")
+            return pd.DataFrame()
+    
 
 
 

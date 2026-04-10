@@ -248,6 +248,127 @@ class ResponseFormatter:
         return "\n".join(lines)
     
     @staticmethod
+    def formatPerformanceChartData(performanceTracker, exchange, accountId: int) -> Dict[str, Any]:
+        """
+        Prepare performance chart data including cumulative P&L and portfolio equity curve.
+        
+        Args:
+            performanceTracker: PerformanceTracker instance
+            exchange: StockExchange instance for portfolio history
+            accountId: Account ID
+        
+        Returns:
+            Dict with chart data suitable for streamlit charting:
+            {
+                'cumulativePnL': {date: cumulative_pnl},
+                'portfolioValue': {date: total_value},
+                'strategyPnL': {strategyName: {date: pnl}},
+                'allFalseIfNoData': bool
+            }
+        """
+        data = {
+            'cumulativePnL': {},
+            'portfolioValue': {},
+            'strategyPnL': {},
+            'hasData': False
+        }
+        
+        # Get portfolio history
+        portfolio_df = exchange.getPortfolioHistory(accountId)
+        if not portfolio_df.empty:
+            data['hasData'] = True
+            for _, row in portfolio_df.iterrows():
+                date_str = str(row['snapshotDate'])
+                data['portfolioValue'][date_str] = float(row['totalValue'])
+        
+        # Get strategy-specific P&L from performance tracker
+        all_strategies = performanceTracker._tradeHistory.keys()
+        for strategy in all_strategies:
+            trades = performanceTracker._tradeHistory.get(strategy, [])
+            strategy_pnl = {}
+            cumulative = 0.0
+            
+            # Sort trades by exit date
+            sorted_trades = sorted(trades, key=lambda t: t.get('exitDate', ''))
+            
+            for trade in sorted_trades:
+                exit_date = trade.get('exitDate', '')
+                if exit_date:
+                    cumulative += trade.get('pnl', 0)
+                    strategy_pnl[exit_date] = cumulative
+            
+            if strategy_pnl:
+                data['strategyPnL'][strategy] = strategy_pnl
+                data['hasData'] = True
+        
+        return data
+    
+    @staticmethod
+    def formatStrategyComparison(performanceTracker: Any, executionLog: List[Dict[str, Any]] = None) -> str:
+        """
+        Format comprehensive strategy comparison with win rates and loss analysis.
+        
+        Args:
+            performanceTracker: PerformanceTracker instance
+            executionLog: List of executed trades for fallback strategy discovery
+        
+        Returns:
+            Formatted markdown table with strategy metrics
+        """
+        metrics = performanceTracker.getAllMetrics()
+        
+        # If no closed trades yet, extract strategy names and count from execution log
+        if (not metrics or len(metrics) == 0) and executionLog:
+            # Count trades per strategy from execution log
+            strategy_trade_counts = {}
+            for trade in executionLog:
+                strategy = trade.get('strategy', 'Unknown')
+                if strategy != 'Unknown':
+                    strategy_trade_counts[strategy] = strategy_trade_counts.get(strategy, 0) + 1
+            
+            all_strategies = set(strategy_trade_counts.keys())
+            
+            # Initialize metrics for all strategies with proper trade counts
+            metrics = {strategy: {
+                'totalTrades': strategy_trade_counts.get(strategy, 0),
+                'winCount': 0,
+                'lossCount': 0,
+                'winRate': 0,
+                'avgWin': 0,
+                'avgLoss': 0,
+                'profitFactor': 0,
+                'totalPnL': 0
+            } for strategy in all_strategies}
+        
+        if not metrics or len(metrics) == 0:
+            return "No strategy performance data available yet. Run the simulation to generate trades."
+        
+        lines = []
+        lines.append("Strategy Performance Comparison")
+        lines.append("")
+        lines.append("| Strategy | Total Trades | Wins | Losses | Win Rate | Avg Win | Avg Loss | Profit Factor | Total P&L |")
+        lines.append("|---|---|---|---|---|---|---|---|---|")
+        
+        for strategy in sorted(metrics.keys()):
+            stats = metrics[strategy]
+            
+            total_count = stats.get('totalTrades', 0)
+            win_count = stats.get('winCount', 0)
+            loss_count = stats.get('lossCount', 0)
+            win_rate = stats.get('winRate', 0) * 100 if 'winRate' in stats else (win_count / total_count * 100 if total_count > 0 else 0)
+            avg_win = stats.get('avgWin', 0)
+            avg_loss = stats.get('avgLoss', 0)
+            profit_factor = stats.get('profitFactor', 0)
+            total_pnl = stats.get('totalPnL', 0)
+            
+            lines.append(
+                f"| {strategy} | {total_count} | {win_count} | {loss_count} | {win_rate:.1f}% | "
+                f"${avg_win:,.2f} | ${avg_loss:,.2f} | {profit_factor:.2f} | ${total_pnl:,.2f} |"
+            )
+        
+        return "\n".join(lines)
+    
+    @staticmethod
     def formatSimulationControl(speedMultiplier: float, startDate: str, 
                                endDate: str, currentDate: str) -> str:
         """

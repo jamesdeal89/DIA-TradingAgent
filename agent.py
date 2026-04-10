@@ -50,7 +50,7 @@ class TradingStrategy(ABC):
         
         Returns:
             {
-                'action': 'long' | 'short' | 'hold',
+                'action': 'long' | 'short' | 'sell' | 'hold',
                 'confidence': float [0.0, 1.0],
                 'reason': str (explanation of decision),
                 'targetQuantity': int (shares to trade if action != 'hold')
@@ -126,11 +126,12 @@ class SentimentStrategy(TradingStrategy):
                     'targetQuantity': 1
                 }
             elif avg_score < -0.2:
+                # Recommend selling longs if sentiment is negative (agent checks portfolio)
                 return {
-                    'action': 'short',
+                    'action': 'sell',
                     'confidence': min(0.95, abs(avg_score)),
-                    'reason': f'Negative sentiment ({avg_score:.2f}) from {headline_count} headlines over {analysisPeriod} days',
-                    'targetQuantity': 1
+                    'reason': f'Negative sentiment ({avg_score:.2f}) - exit long positions',
+                    'targetQuantity': 0
                 }
             else:
                 return {
@@ -207,11 +208,12 @@ class MeanReversionStrategy(TradingStrategy):
                     'targetQuantity': 1
                 }
             elif z_score > threshold:  # Price is threshold+ std devs above mean
+                # Recommend selling (agent will check portfolio before executing)
                 return {
-                    'action': 'short',
+                    'action': 'sell',
                     'confidence': min(0.9, 0.5 + abs(z_score) * 0.15),
-                    'reason': f'Price {current_price:.2f} is {abs(z_score):.2f}sd above {lookback_window}d mean {mean_price:.2f}',
-                    'targetQuantity': 1
+                    'reason': f'Price {current_price:.2f} ({abs(z_score):.2f}sd above mean) - exit signal',
+                    'targetQuantity': 0
                 }
             else:
                 return {
@@ -287,23 +289,40 @@ class TechnicalStrategy(TradingStrategy):
                     action = 'long'
                     confidence = max(confidence, (30 - rsi) / 30)  # 0.0-1.0
                     reason = f"RSI {rsi:.1f} oversold"
+                else:
+                    # Neutral RSI: provide confidence based on proximity to extremes
+                    if rsi > 60:
+                        confidence = 0.2  # Approaching overbought
+                    elif rsi < 40:
+                        confidence = 0.2  # Approaching oversold
+                    else:
+                        confidence = 0.1  # Mid-range, low conviction
+            else:
+                # RSI calculation failed, use minimal confidence
+                confidence = 0.15
             
             # MACD confirmation (use if RSI is hold)
             if action == 'hold' and macd is not None and signal is not None:
                 if macd > signal:
                     action = 'long'
-                    confidence = 0.6
-                    reason = "MACD bullish crossover"
+                    confidence = max(confidence, 0.6)
+                    reason = "MACD bullish crossover" if reason == "" else reason
                 elif macd < signal:
                     action = 'short'
-                    confidence = 0.6
-                    reason = "MACD bearish crossover"
+                    confidence = max(confidence, 0.6)
+                    reason = "MACD bearish crossover" if reason == "" else reason
+            
+            # If overbought, recommend selling (agent will check portfolio before executing)
+            if rsi is not None and rsi > 70:
+                action = 'sell'
+                confidence = max(confidence, (rsi - 70) / 30)
+                reason = f"Selling overbought position (RSI {rsi:.1f})"
             
             return {
                 'action': action,
                 'confidence': confidence,
                 'reason': reason or 'No technical signal',
-                'targetQuantity': 1 if action != 'hold' else 0
+                'targetQuantity': 0 if action == 'sell' else (1 if action != 'hold' else 0)
             }
         
         except Exception as e:
@@ -405,12 +424,13 @@ class FundamentalStrategy(TradingStrategy):
                     'reason': f'Strong momentum ({momentum*100:.1f}%) over {lookback_window}d with controlled volatility',
                     'targetQuantity': 1
                 }
-            elif momentum < -0.05 and volatility < 0.04: 
+            elif momentum < -0.05 and volatility < 0.04:
+                # Weak momentum = recommend selling longs (agent checks portfolio)
                 return {
-                    'action': 'short',
+                    'action': 'sell',
                     'confidence': min(0.8, 0.4 + abs(momentum)),
-                    'reason': f'Weak momentum ({momentum*100:.1f}%) over {lookback_window}d with controlled volatility',
-                    'targetQuantity': 1
+                    'reason': f'Weak momentum ({momentum*100:.1f}%) - exit long positions',
+                    'targetQuantity': 0
                 }
             else:
                 return {
@@ -843,6 +863,9 @@ class Agent:
             except Exception as e:
                 print(f"[Agent {self.agentId}] ERROR processing {ticker}: {e}")
                 logger.error(f"Agent {self.agentId}: failed to process {ticker}: {e}")
+        
+        # Log portfolio snapshot at decision point
+        exchange.logPortfolioSnapshot(self.accountId, self.agentId, simDate)
     
     def _analyseAndTrade(self, exchange, ticker: str, simDate: str) -> None:
         '''
@@ -885,22 +908,23 @@ class Agent:
         # Execute buy/short
         try:
             target_quantity = recommendation.get('targetQuantity', 0)
-            self.executeAction(exchange, ticker, action, target_quantity, simDate, selected_strategy_name)
+            self.executeAction(exchange, ticker, action, target_quantity, simDate, selected_strategy_name, confidence_rec)
         except Exception as e:
             print(f"[Agent {self.agentId}] ERROR: Trade execution failed for {ticker} - {e}")
             logger.error(f"Agent {self.agentId}: executeAction({ticker}) failed: {e}")
     
-    def executeAction(self, exchange, ticker: str, action: str, quantity: int, simDate: str, strategyName: str) -> None:
+    def executeAction(self, exchange, ticker: str, action: str, quantity: int, simDate: str, strategyName: str, confidence: float = 0.0) -> None:
         '''
-        Execute a trade action (LONG or SHORT).
+        Execute a trade action (LONG, SHORT, SELL, or HOLD).
         
         Args:
             exchange: StockExchange instance
             ticker: Stock ticker symbol
-            action: Trade action ('long' or 'short')
+            action: Trade action ('long', 'short', 'sell', or 'hold')
             quantity: Number of shares to trade
             simDate: Current simulation date (YYYY-MM-DD)
             strategyName: Name of strategy recommending the trade
+            confidence: Confidence score from strategy (0.0-1.0)
         '''
         try:
             if action == 'long':
@@ -915,6 +939,29 @@ class Agent:
                                   strategyName=strategyName, agentId=self.agentId)
                 print(f"[Agent {self.agentId}] SUCCESS: SHORT {ticker} x{quantity} via {strategyName}")
                 logger.info(f"Agent {self.agentId}: SHORT {ticker} x{quantity} executed via {strategyName}")
+            elif action == 'sell':
+                # Sell existing long position
+                portfolio = exchange.checkPortfolio(self.accountId, simDate)
+                if portfolio is not None and not portfolio.empty:
+                    long_positions = portfolio[(portfolio['ticker'] == ticker) & (portfolio['tradeType'] == 'long')]
+                    if not long_positions.empty:
+                        pos = long_positions.iloc[0]
+                        sell_qty = int(pos['quantity'])
+                        entry_price = float(pos.get('entryPrice', 0))
+                        entry_date = pos.get('entryDate', simDate)
+                        pos_strategy = pos.get('strategyName', strategyName)  
+                        
+                        print(f"[Agent {self.agentId}] EXECUTING SELL: {ticker} x{sell_qty}")
+                        exchange.sellLong(self.accountId, ticker, self.mic, sell_qty, simDate,
+                                        strategyName=pos_strategy, entryPrice=entry_price, entryDate=entry_date)
+                        print(f"[Agent {self.agentId}] SUCCESS: SOLD {ticker} x{sell_qty} via {strategyName}")
+                        logger.info(f"Agent {self.agentId}: SOLD {ticker} x{sell_qty} executed via {strategyName}")
+                    else:
+                        logger.info(f"Agent {self.agentId}: No long position to sell for {ticker}")
+                        return
+                else:
+                    logger.info(f"Agent {self.agentId}: No portfolio data for {ticker}")
+                    return
             
             self.totalTrades += 1
             self._executionLog.append({
@@ -922,7 +969,7 @@ class Agent:
                 'ticker': ticker,
                 'action': action,
                 'quantity': quantity,
-                'confidence': 0,
+                'confidence': confidence,
                 'timestamp': simDate
             })
         except Exception as e:

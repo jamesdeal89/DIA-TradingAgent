@@ -185,8 +185,7 @@ class NewsAnalyser:
         
         logger.info(f"Fine-tuning on {len(headlines_df)} headlines...")
         
-        # Prepare data for fine-tuning
-        # Here we use unsupervised fine-tuning (MLM) on the headlines themselves.
+        # Prepare data for fine-tuning (unsupervised MLM on headlines)
         try:
             # Convert to HuggingFace Dataset
             dataset = Dataset.from_pandas(headlines_df[['headline']].reset_index(drop=True))

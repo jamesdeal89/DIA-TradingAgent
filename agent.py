@@ -19,52 +19,11 @@ import threading
 import time
 import logging
 from datetime import datetime, timedelta
+from tradingStrategy import TradingStrategy
+from qLearningStrategy import DeepQLearningStrategy
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-
-# ABSTRACT BASE CLASS: TradingStrategy
-
-class TradingStrategy(ABC):
-    """
-    Abstract base class for all trading strategies.
-    Each strategy implements analyse() to return a trade recommendation.
-    """
-    
-    def __init__(self, name: str, version: str = "1.0"):
-        """Initialise strategy with name and version."""
-        self.name = name
-        self.version = version
-    
-    @abstractmethod
-    def analyse(self, ticker: str, mic: str, simDate: str, exchange) -> Dict[str, Any]:
-        """
-        analyse a stock and return a trade recommendation.
-        
-        Args:
-            ticker: Stock ticker symbol (e.g., 'AAPL')
-            mic: Market Identifier Code (e.g., 'XNAS', 'XLON')
-            simDate: Current simulation date in YYYY-MM-DD format
-            exchange: StockExchange instance for data access
-        
-        Returns:
-            {
-                'action': 'long' | 'short' | 'sell' | 'hold',
-                'confidence': float [0.0, 1.0],
-                'reason': str (explanation of decision),
-                'targetQuantity': int (shares to trade if action != 'hold')
-            }
-        """
-        pass
-    
-    def getName(self) -> str:
-        """Return strategy name."""
-        return self.name
-    
-    def getVersion(self) -> str:
-        """Return strategy version."""
-        return self.version
 
 
 # CONCRETE STRATEGY: SENTIMENT ANALYSIS
@@ -117,15 +76,15 @@ class SentimentStrategy(TradingStrategy):
             # Calculate average sentiment score across all collected headlines
             avg_score = sum(all_scores) / len(all_scores) if all_scores else 0.0
             
-            # Determine action based on sentiment
-            if avg_score > 0.2:
+            # Determine action based on sentiment (lower threshold 0.1 for more frequent trades)
+            if avg_score > 0.1:
                 return {
                     'action': 'long',
                     'confidence': min(0.95, abs(avg_score)),
                     'reason': f'Positive sentiment ({avg_score:.2f}) from {headline_count} headlines over {analysisPeriod} days',
                     'targetQuantity': 1
                 }
-            elif avg_score < -0.2:
+            elif avg_score < -0.1:
                 # Recommend selling longs if sentiment is negative (agent checks portfolio)
                 return {
                     'action': 'sell',
@@ -197,8 +156,8 @@ class MeanReversionStrategy(TradingStrategy):
             # Calculate z-score (how many std devs away from mean)
             z_score = (current_price - mean_price) / std_price if std_price > 0 else 0
             
-            # Trading logic (threshold adjusts with period to reduce false signals)
-            threshold = 1.5 if analysisPeriod > 10 else 2.0
+            # Trading logic (lower threshold 1.0 for more frequent trades)
+            threshold = 1.0
             
             if z_score < -threshold:  # Price is threshold+ std devs below mean
                 return {
@@ -416,15 +375,15 @@ class FundamentalStrategy(TradingStrategy):
             price_today = data['Close'].iloc[-1]
             momentum = (price_today - price_ago) / price_ago
             
-            # Decision logic: if momentum is strong and volatility is moderate, go long
-            if momentum > 0.05 and volatility < 0.04:
+            # Decision logic: lower momentum threshold (0.03) and higher volatility tolerance for more trades
+            if momentum > 0.03 and volatility < 0.06:
                 return {
                     'action': 'long',
                     'confidence': min(0.8, 0.4 + momentum),
                     'reason': f'Strong momentum ({momentum*100:.1f}%) over {lookback_window}d with controlled volatility',
                     'targetQuantity': 1
                 }
-            elif momentum < -0.05 and volatility < 0.04:
+            elif momentum < -0.03 and volatility < 0.06:
                 # Weak momentum = recommend selling longs (agent checks portfolio)
                 return {
                     'action': 'sell',
@@ -657,9 +616,9 @@ class StrategySelector:
             selected = random.choice(availableStrategies)
             logger.info(f"[StrategySelector] Exploration phase (epsilon={self.epsilon}): selected {selected}")
         else:
-            # Exploit: select highest profit factor
-            bestStrategy = None
+            # Exploit: select highest profit factor, with random tiebreaker for equal performers
             bestPf = -np.inf
+            bestStrategies = []
             
             for strategyName in availableStrategies:
                 metrics = performanceMetrics.get(strategyName, {})
@@ -667,9 +626,12 @@ class StrategySelector:
                 
                 if pf > bestPf:
                     bestPf = pf
-                    bestStrategy = strategyName
+                    bestStrategies = [strategyName]
+                elif pf == bestPf:
+                    bestStrategies.append(strategyName)
             
-            selected = bestStrategy or random.choice(availableStrategies)
+            # Random tiebreaker: when multiple strategies have same best PF, pick randomly
+            selected = random.choice(bestStrategies) if bestStrategies else random.choice(availableStrategies)
             logger.info(f"[StrategySelector] Exploitation: selected {selected} (PF={bestPf:.2f})")
         
         self._selectionHistory.append(selected)
@@ -710,15 +672,7 @@ class Agent:
     # Market Identifier Code to ticker mapping
     MIC_TICKERS = {
         'XNAS': ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'AMZN'],
-        'XLON': ['HSXA', 'BP', 'SHEL', 'ULVR', 'AZN'],
-        'XHKG': ['0700', '0388', '1113', '0005', '0011'],
-        'XJPX': ['7203', '6758', '9984', '6861', '8053']
-    }
-
-    # Market Identifier Code to ticker mapping
-    MIC_TICKERS = {
-        'XNAS': ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'AMZN'],
-        'XLON': ['HSXA', 'BP', 'SHEL', 'ULVR', 'AZN'],
+        'XLON': ['BP', 'SHEL', 'AZN', 'VOD', 'LLOY'],
         'XHKG': ['0700', '0388', '1113', '0005', '0011'],
         'XJPX': ['7203', '6758', '9984', '6861', '8053']
     }
@@ -760,16 +714,20 @@ class Agent:
         self._stopFlag = False
         self._lock = threading.Lock()
         
+        # Initialise strategies
+        self._initialiseStrategies()
+        
         logger.info(f"Agent {agentId} initialised (accountId={accountId}, MIC={mic}, simDate={simDate}, decisionPeriod={self.decisionPeriod}d)")
     
     def _initialiseStrategies(self) -> None:
         """Initialise all available strategies, respecting banned/preferred."""
-        # Instantiate all 4 trading strategies
+        # Instantiate all trading strategies
         all_strategies = {
             'Sentiment': SentimentStrategy(),
             'MeanReversion': MeanReversionStrategy(),
             'Technical': TechnicalStrategy(),
             'Fundamental': FundamentalStrategy(),
+            'DeepQL': DeepQLearningStrategy(),
         }
         
         # Apply bans
@@ -782,7 +740,7 @@ class Agent:
         
         logger.info(f"Agent {self.agentId}: Initialised {len(self.strategies)} strategies: {list(self.strategies.keys())}")
         
-        self.strategySelector = StrategySelector(self.strategies)
+        self.strategySelector = StrategySelector(self.strategies, epsilon=0.35, minTradesRequired=2)
     
     # LIFECYCLE CONTROL
     
@@ -844,10 +802,6 @@ class Agent:
         # Increment timestep counter for tracking purposes
         self._timestepCounter += 1
         
-        # Initialise strategies if not already done
-        if not self.strategies:
-            self._initialiseStrategies()
-        
         # Get all tickers for this market
         tickers = self.MIC_TICKERS.get(self.mic, [])
         if not tickers:
@@ -856,28 +810,7 @@ class Agent:
         
         print(f"[Agent {self.agentId}] Decision Day {simDate} (period={self.decisionPeriod}d) on {self.mic}: analyzing {len(tickers)} stocks")
         
-        # Analyse and trade each stock in sequence
-        for ticker in tickers:
-            try:
-                self._analyseAndTrade(exchange, ticker, simDate)
-            except Exception as e:
-                print(f"[Agent {self.agentId}] ERROR processing {ticker}: {e}")
-                logger.error(f"Agent {self.agentId}: failed to process {ticker}: {e}")
-        
-        # Log portfolio snapshot at decision point
-        exchange.logPortfolioSnapshot(self.accountId, self.agentId, simDate)
-    
-    def _analyseAndTrade(self, exchange, ticker: str, simDate: str) -> None:
-        '''
-        Internal method: analyse a single ticker and execute trade if recommended.
-        Only called on decision days (every N days based on decisionPeriod).
-        
-        Args:
-            exchange: StockExchange instance
-            ticker: Stock ticker symbol
-            simDate: Current simulation date (YYYY-MM-DD)
-        '''
-        # Select strategy based on performance
+        # Select ONE strategy for this entire timestep (used for all stocks)
         try:
             metrics = self.performanceTracker.getAllMetrics()
             selected_strategy_name = self.strategySelector.selectStrategy(metrics, self.totalTrades)
@@ -886,6 +819,31 @@ class Agent:
             print(f"[Agent {self.agentId}] ERROR: Strategy selection failed - {e}")
             logger.error(f"Agent {self.agentId}: strategy selection failed: {e}")
             return
+        
+        # Analyse and trade each stock in sequence using the same strategy
+        for ticker in tickers:
+            try:
+                self._analyseAndTrade(exchange, ticker, simDate, selected_strategy_name, selected_strategy)
+            except Exception as e:
+                print(f"[Agent {self.agentId}] ERROR processing {ticker}: {e}")
+                logger.error(f"Agent {self.agentId}: failed to process {ticker}: {e}")
+        
+        # Log portfolio snapshot at decision point
+        exchange.logPortfolioSnapshot(self.accountId, self.agentId, simDate)
+    
+    def _analyseAndTrade(self, exchange, ticker: str, simDate: str, 
+                         selected_strategy_name: str, selected_strategy: TradingStrategy) -> None:
+        '''
+        Internal method: analyse a single ticker using the given strategy and execute trade if recommended.
+        Only called on decision days (every N days based on decisionPeriod).
+        
+        Args:
+            exchange: StockExchange instance
+            ticker: Stock ticker symbol
+            simDate: Current simulation date (YYYY-MM-DD)
+            selected_strategy_name: Name of the strategy to use
+            selected_strategy: Strategy instance to use for analysis
+        '''
         
         # Get trade recommendation from strategy with decision period as analysis window
         try:
@@ -929,14 +887,22 @@ class Agent:
         try:
             if action == 'long':
                 print(f"[Agent {self.agentId}] EXECUTING LONG: {ticker} x{quantity}")
-                exchange.placeLong(ticker, self.mic, quantity, self.accountId, simDate, 
+                result = exchange.placeLong(ticker, self.mic, quantity, self.accountId, simDate, 
                                  strategyName=strategyName, agentId=self.agentId)
+                if result == -1:
+                    print(f"[Agent {self.agentId}] TRADE ERROR: long {ticker} failed - insufficient balance or delisted stock")
+                    logger.error(f"Agent {self.agentId}: long {ticker} execution failed")
+                    return
                 print(f"[Agent {self.agentId}] SUCCESS: LONG {ticker} x{quantity} via {strategyName}")
                 logger.info(f"Agent {self.agentId}: LONG {ticker} x{quantity} executed via {strategyName}")
             elif action == 'short':
                 print(f"[Agent {self.agentId}] EXECUTING SHORT: {ticker} x{quantity}")
-                exchange.placeShort(ticker, self.mic, quantity, self.accountId, simDate, 
+                result = exchange.placeShort(ticker, self.mic, quantity, self.accountId, simDate, 
                                   strategyName=strategyName, agentId=self.agentId)
+                if result == -1:
+                    print(f"[Agent {self.agentId}] TRADE ERROR: short {ticker} failed - check error log")
+                    logger.error(f"Agent {self.agentId}: short {ticker} execution failed")
+                    return
                 print(f"[Agent {self.agentId}] SUCCESS: SHORT {ticker} x{quantity} via {strategyName}")
                 logger.info(f"Agent {self.agentId}: SHORT {ticker} x{quantity} executed via {strategyName}")
             elif action == 'sell':
@@ -952,8 +918,12 @@ class Agent:
                         pos_strategy = pos.get('strategyName', strategyName)  
                         
                         print(f"[Agent {self.agentId}] EXECUTING SELL: {ticker} x{sell_qty}")
-                        exchange.sellLong(self.accountId, ticker, self.mic, sell_qty, simDate,
+                        result = exchange.sellLong(self.accountId, ticker, self.mic, sell_qty, simDate,
                                         strategyName=pos_strategy, entryPrice=entry_price, entryDate=entry_date)
+                        if result == -1:
+                            print(f"[Agent {self.agentId}] TRADE ERROR: sell {ticker} failed - delisted stock")
+                            logger.error(f"Agent {self.agentId}: sell {ticker} execution failed")
+                            return
                         print(f"[Agent {self.agentId}] SUCCESS: SOLD {ticker} x{sell_qty} via {strategyName}")
                         logger.info(f"Agent {self.agentId}: SOLD {ticker} x{sell_qty} executed via {strategyName}")
                     else:

@@ -19,32 +19,18 @@ from typing import Dict, List, Any, Optional, Tuple
 from collections import deque
 import random
 import logging
-from agent import TradingStrategy
+from tradingStrategy import TradingStrategy
 from datetime import datetime, timedelta
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# DEEP Q LEARNING STRATEGY
-
 class DQNNetwork(nn.Module):
-    """
-    Deep Q-Network: maps state -> Q-values for each action.
-    
-    Input: state vector (combination of sentiment, technical indicators, price metrics)
-    Output: Q-values for [LONG, SHORT, HOLD]
-    """
+    """Neural network mapping state to Q-values."""
     
     def __init__(self, state_size: int, action_size: int = 3, hidden_size: int = 128):
-        """
-        Initialise neural network.
-        
-        Args:
-            state_size: Dimension of state vector
-            action_size: Number of actions (default: 3 = LONG, SHORT, HOLD)
-            hidden_size: Hidden layer dimensions
-        """
+        """Initialize network with given state and action sizes."""
         super(DQNNetwork, self).__init__()
         self.state_size = state_size
         self.action_size = action_size
@@ -57,76 +43,44 @@ class DQNNetwork(nn.Module):
         self.relu = nn.ReLU()
     
     def forward(self, state: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass: state -> Q-values.
-        
-        Args:
-            state: State tensor of shape (batch_size, state_size) or (state_size,)
-        
-        Returns:
-            Q-values tensor of shape (batch_size, action_size) or (action_size,)
-        """
+        """Forward pass returning Q-values for each action."""
         x = self.relu(self.fc1(state))
         x = self.relu(self.fc2(x))
         q_values = self.fc3(x)
         return q_values
 
 
-# STATE BUILDER: MULTI-DIMENSIONAL STATE CONSTRUCTION
-
 class StateBuilder:
-    """
-    Constructs state vectors from market data and external signals.
+    """Builds state vectors from market data (sentiment, technical, price, volume features)."""
     
-    State components:
-    1. Sentiment (1 feature): -1.0 to +1.0 from news sentiment analysis
-    2. Technical Indicators (3-4 features): RSI, MACD, Bollinger Band position
-    3. Price Performance (3-4 features): momentum, volatility, trend
-    4. Market Microstructure (2-3 features): volume trend, bid-ask spread proxy
-    
-    Total state size: ~10-12 features
-    """
-    
-    STATE_SIZE = 12  # Update based on final feature count
+    STATE_SIZE = 12  # sentiment(1) + technical(3) + price(3) + market(2) + extra(3)
     
     @staticmethod
     def buildState(ticker: str, mic: str, simDate: str, exchange, 
                    analysisPeriod: int = 1, sentimentAnalyser=None) -> np.ndarray:
-        """
-        Construct state vector for a stock at a given date.
-        
-        Args:
-            ticker: Stock ticker symbol
-            mic: Market Identifier Code
-            simDate: Current simulation date (YYYY-MM-DD)
-            exchange: StockExchange instance (for OHLCV data and news)
-            analysisPeriod: Lookback window in days for building features (scales with decision period)
-            sentimentAnalyser: Sentiment analyser instance (for news sentiment)
-        
-        Returns:
-            State vector as numpy array of shape (STATE_SIZE,)
-        """
+        """Build normalized state vector for a stock."""
         state = []
         
         try:
-            # 1. SENTIMENT FEATURE (1)
             sentiment_score = StateBuilder._getSentimentFeature(ticker, mic, simDate, exchange, sentimentAnalyser)
             state.append(sentiment_score)
             
-            # 2. TECHNICAL INDICATORS (3-4)
             rsi, macd, bbPosition = StateBuilder._getTechnicalFeatures(ticker, simDate, exchange, analysisPeriod)
             state.extend([rsi, macd, bbPosition])
             
-            # 3. PRICE PERFORMANCE (3-4)
             momentum, volatility, trend = StateBuilder._getPricePerformanceFeatures(ticker, simDate, exchange, analysisPeriod)
             state.extend([momentum, volatility, trend])
             
-            # 4. MARKET MICROSTRUCTURE (2-3)
-            volume_trend, price_level = StateBuilder._getMarketFeatures(ticker, simDate, exchange)
-            state.extend([volume_trend, price_level])
+            volume_trend, price_level, extra_feature = StateBuilder._getMarketFeatures(ticker, simDate, exchange)
+            state.extend([volume_trend, price_level, extra_feature])
             
-            # Normalise state to [-1, 1] range.
             state = np.array(state, dtype=np.float32)
+            
+            if len(state) < StateBuilder.STATE_SIZE:
+                state = np.pad(state, (0, StateBuilder.STATE_SIZE - len(state)), mode='constant', constant_values=0.0)
+            elif len(state) > StateBuilder.STATE_SIZE:
+                state = state[:StateBuilder.STATE_SIZE]
+            
             state = np.clip(state, -1.0, 1.0)  
             
             return state
@@ -136,16 +90,8 @@ class StateBuilder:
             return np.zeros(StateBuilder.STATE_SIZE, dtype=np.float32)
     
     @staticmethod
-    @staticmethod
     def _getSentimentFeature(ticker: str, mic: str, simDate: str, exchange, sentimentAnalyser) -> float:
-        """
-        Get normalised sentiment score (-1 to +1).
-        
-        Fetches headlines from exchange and analyses them using SentimentAnalyser.
-        
-        Returns:
-            Sentiment score in range [-1.0, +1.0], or 0.0 if unavailable
-        """
+        """Fetch and normalize sentiment score from news headlines."""
         if sentimentAnalyser is None or exchange is None:
             return 0.0
         
@@ -169,19 +115,7 @@ class StateBuilder:
     
     @staticmethod
     def _getTechnicalFeatures(ticker: str, simDate: str, exchange, analysisPeriod: int = 1) -> Tuple[float, float, float]:
-        """
-        Get technical indicators: RSI, MACD, Bollinger Band position.
-        Scales lookback window based on analysisPeriod.
-        
-        Args:
-            ticker: Stock ticker
-            simDate: Current simulation date
-            exchange: StockExchange instance
-            analysisPeriod: Lookback window for technical analysis (scales indicator periods)
-        
-        Returns:
-            (rsiNormalised, macdSignal, bbPosition) all normalised to [-1, 1] range
-        """
+        """Compute RSI, MACD, and Bollinger Band position."""
         try:
             # Fetch price history - scale lookback with analysisPeriod
             from datetime import datetime, timedelta
@@ -219,19 +153,7 @@ class StateBuilder:
     
     @staticmethod
     def _getPricePerformanceFeatures(ticker: str, simDate: str, exchange, analysisPeriod: int = 1) -> Tuple[float, float, float]:
-        """
-        Get price-based features: momentum, volatility, trend.
-        Scales analysis window based on analysisPeriod.
-        
-        Args:
-            ticker: Stock ticker
-            simDate: Current simulation date (YYYY-MM-DD)
-            exchange: StockExchange instance
-            analysisPeriod: Window size for momentum/trend calculation (in days)
-        
-        Returns:
-            (momentum, volatility, trend) all normalised to [-1, 1]
-        """
+        """Compute momentum, volatility, and trend features."""
         try:
             # Fetch price history - scale to analysisPeriod
             from datetime import datetime, timedelta
@@ -269,18 +191,13 @@ class StateBuilder:
             return 0.0, 0.0, 0.0
     
     @staticmethod
-    def _getMarketFeatures(ticker: str, simDate: str, exchange) -> Tuple[float, float]:
-        """
-        Get market microstructure features: volume trend, price level.
-        
-        Returns:
-            (volumeTrend, priceLevel) normalised to [-1, 1]
-        """
+    def _getMarketFeatures(ticker: str, simDate: str, exchange) -> Tuple[float, float, float]:
+        """Compute volume trend, price level, and price acceleration."""
         try:
             # Volume trend: get recent volume data
             data = exchange.getStockData(ticker, period='1mo')
             if data is None or len(data) < 1:
-                return 0.0, 0.0
+                return 0.0, 0.0, 0.0
             
             volumes = data['Volume'].values
             vol_trend = (volumes[-1] - np.mean(volumes[:-1])) / np.mean(volumes[:-1]) if np.mean(volumes[:-1]) != 0 else 0.0
@@ -288,23 +205,33 @@ class StateBuilder:
             
             # Price level: current price as percentile of 52-week range
             price_year = exchange.getStockData(ticker, period='1y')
-            if price_year and len(price_year) > 0:
-                prices_year = price_year['Close'].values
-                price_level = (prices_year[-1] - np.min(prices_year)) / (np.max(prices_year) - np.min(prices_year)) if np.max(prices_year) != np.min(prices_year) else 0.5
-                price_level = (price_level - 0.5) * 2  # Map [0, 1] to [-1, 1]
-            else:
-                price_level = 0.0
+            price_level = 0.0
+            price_accel = 0.0
             
-            return float(vol_trend), float(price_level)
+            if price_year is not None:
+                try:
+                    if len(price_year) > 0:
+                        prices_year = price_year['Close'].values
+                        price_level = (prices_year[-1] - np.min(prices_year)) / (np.max(prices_year) - np.min(prices_year)) if np.max(prices_year) != np.min(prices_year) else 0.5
+                        price_level = (price_level - 0.5) * 2  # Map [0, 1] to [-1, 1]
+                        
+                        # Price acceleration: second derivative of price
+                        if len(prices_year) > 2:
+                            returns = np.diff(prices_year) / prices_year[:-1]
+                            accel = np.diff(returns)
+                            price_accel = np.clip(np.mean(accel[-10:]) * 100, -1.0, 1.0) if len(accel) > 0 else 0.0
+                except (ValueError, TypeError):
+                    pass
+            
+            return float(vol_trend), float(price_level), float(price_accel)
         
         except Exception as e:
             logger.warning(f"Error computing market features: {e}")
-            return 0.0, 0.0
+            return 0.0, 0.0, 0.0
     
-    # Helper methods for indicator calculation
     @staticmethod
     def _calculateRsi(prices: np.ndarray, period: int = 14) -> float:
-        """Calculate RSI (0-100)."""
+        """Calculate RSI."""
         if len(prices) < period + 1:
             return 50.0
         
@@ -324,7 +251,7 @@ class StateBuilder:
     
     @staticmethod
     def _calculateMacd(prices: np.ndarray, fast: int = 12, slow: int = 26, signal: int = 9) -> Tuple[Optional[float], Optional[float]]:
-        """Calculate MACD and signal line."""
+        """Calculate MACD."""
         if len(prices) < slow:
             return None, None
         
@@ -337,7 +264,7 @@ class StateBuilder:
     
     @staticmethod
     def _calculateEMA(prices: np.ndarray, period: int) -> float:
-        """Calculate Exponential Moving Average."""
+        """Calculate EMA."""
         multiplier = 2 / (period + 1)
         ema = prices[0]
         for price in prices[1:]:
@@ -346,7 +273,7 @@ class StateBuilder:
     
     @staticmethod
     def _calculateBollingerBandPosition(prices: np.ndarray, period: int = 20) -> float:
-        """Calculate position within Bollinger Bands (0-1, where 0.5 is middle band)."""
+        """Calculate Bollinger Band position (0-1)."""
         if len(prices) < period:
             return 0.5
         
@@ -360,18 +287,8 @@ class StateBuilder:
         return float(np.clip(bb_pos, 0.0, 1.0))
 
 
-# DEEP Q-LEARNING STRATEGY
-
 class DeepQLearningStrategy(TradingStrategy):
-    """
-    Trading strategy using Deep Q-Learning to learn optimal actions.
-    
-    State: Multi-dimensional (sentiment, technical, price, market features)
-    Actions: LONG, SHORT, HOLD
-    
-    Training: Learns from experience buffer using experience replay
-    Inference: Uses trained network to select best action (with epsilon-greedy exploration)
-    """
+    """Deep Q-Learning strategy: learns optimal trading actions via neural network."""
     
     # Action encoding
     ACTION_LONG = 0
@@ -381,15 +298,7 @@ class DeepQLearningStrategy(TradingStrategy):
     
     def __init__(self, learning_rate: float = 0.001, gamma: float = 0.99, 
                  epsilon: float = 0.1, model_path: Optional[str] = None):
-        """
-        Initialise Deep Q-Learning strategy.
-        
-        Args:
-            learning_rate: Adam optimizer learning rate
-            gamma: Discount factor for future rewards
-            epsilon: Epsilon-greedy exploration rate
-            model_path: Path to pre-trained model (optional)
-        """
+        """Initialize Deep Q-Learning strategy."""
         super().__init__(name="DeepQLearning", version="1.0")
         
         self.learning_rate = learning_rate
@@ -415,19 +324,7 @@ class DeepQLearningStrategy(TradingStrategy):
                 logger.warning(f"Could not load model from {model_path}: {e}")
     
     def analyse(self, ticker: str, mic: str, simDate: str, exchange, analysisPeriod: int = 1) -> Dict[str, Any]:
-        """
-        Analyse a stock and recommend an action using trained Q-network.
-        
-        Args:
-            ticker: Stock ticker symbol
-            mic: Market Identifier Code
-            simDate: Current simulation date (YYYY-MM-DD)
-            exchange: StockExchange instance
-            analysisPeriod: Window size for building state (default 1 day, scales with decision period)
-        
-        Returns:
-            {'action': 'long'|'short'|'hold', 'confidence': float, 'qvalues': list}
-        """
+        """Recommend trading action using Q-network inference."""
         try:
             # Build state with larger lookback window for longer analysis periods
             state = StateBuilder.buildState(ticker, mic, simDate, exchange, analysisPeriod=analysisPeriod)
@@ -455,38 +352,22 @@ class DeepQLearningStrategy(TradingStrategy):
             return {
                 'action': action_str,
                 'confidence': confidence,
+                'targetQuantity': 1,  
                 'qvalues': q_values.cpu().numpy().tolist(),
                 'state': state.tolist()
             }
         
         except Exception as e:
             logger.error(f"Error in Deep Q-Learning analyse: {e}")
-            return {'action': 'hold', 'confidence': 0.0, 'reason': str(e)}
+            return {'action': 'hold', 'confidence': 0.0, 'targetQuantity': 0, 'reason': str(e)}
     
     def recordExperience(self, state: np.ndarray, action: int, reward: float, 
                         next_state: np.ndarray, done: bool) -> None:
-        """
-        Record an experience for training (called during backtesting).
-        
-        Args:
-            state: Current state
-            action: Action taken (0, 1, or 2)
-            reward: Reward received
-            next_state: Resulting state
-            done: Whether episode terminated
-        """
+        """Record experience for training via experience replay."""
         self.experience_buffer.append((state, action, reward, next_state, done))
     
     def train(self, batch_size: int = 32) -> float:
-        """
-        Train network on experience batch (experience replay).
-        
-        Args:
-            batch_size: Batch size for training
-        
-        Returns:
-            Average loss for this batch
-        """
+        """Train network on random batch from experience buffer."""
         if len(self.experience_buffer) < batch_size:
             return 0.0
         
@@ -518,15 +399,7 @@ class DeepQLearningStrategy(TradingStrategy):
         return float(loss.item())
     
     def saveModel(self, path: str) -> bool:
-        """
-        Save trained model to disk.
-        
-        Args:
-            path: File path to save model
-        
-        Returns:
-            True if successful, False otherwise
-        """
+        """Save model weights to file."""
         try:
             torch.save(self.network.state_dict(), path)
             logger.info(f"Model saved to {path}")
@@ -536,15 +409,7 @@ class DeepQLearningStrategy(TradingStrategy):
             return False
     
     def loadModel(self, path: str) -> bool:
-        """
-        Load trained model from disk.
-        
-        Args:
-            path: File path to load model from
-        
-        Returns:
-            True if successful, False otherwise
-        """
+        """Load model weights from file."""
         try:
             self.network.load_state_dict(torch.load(path))
             logger.info(f"Model loaded from {path}")

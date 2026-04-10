@@ -126,6 +126,9 @@ def startAgent(mic, prefStrategy, bannedList, simDate=None, decisionPeriod=1, is
             decisionPeriod=decisionPeriod
         )
         
+        # Pass agent's performanceTracker to exchange so closed trades get recorded
+        exchange.performanceTracker = agent.performanceTracker
+        
         st.session_state.activeAgents[accountId] = {
             'agent': agent,
             'mic': mic,

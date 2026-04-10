@@ -137,6 +137,35 @@ class StockExchange:
         # Instead returns default value '' if no match in dict.
         return f"{ticker}{suffix.get(mic, '')}"
     
+    def _getSafePrice(self, ticker, mic, simDate):
+        '''
+        Safely gets the price for a stock.
+        Returns the last close price, or raises ValueError if data is unavailable (delisted stocks).
+        
+        Args:
+            ticker: Stock ticker
+            mic: Market identifier code
+            simDate: Simulation date
+        
+        Returns:
+            float: Last close price
+        
+        Raises:
+            ValueError: If stock is delisted or has no data
+        '''
+        try:
+            data = self.getStockData(self.__getMicTicker(ticker, mic), end=simDate)
+            if data is None or data.empty or 'Close' not in data.columns:
+                raise ValueError(f"No price data available for {ticker} on {simDate}. Stock may be delisted.")
+            price = float(data['Close'].iloc[-1])
+            return price
+        except (IndexError, KeyError) as e:
+            raise ValueError(f"Cannot retrieve price for {ticker} on {simDate}. Stock may be delisted or data unavailable.")
+        except ValueError:
+            raise
+        except Exception as e:
+            raise ValueError(f"Error fetching price for {ticker}: {str(e)}")
+    
     def getMicTicker(self, ticker: str, mic: str) -> str:
         '''
         Public method: Convert bare ticker to yfinance-compatible ticker with MIC suffix.
@@ -219,7 +248,11 @@ class StockExchange:
             agentId: Optional agent ID for tracking
         '''
         # Add current price of shorted stock to account balance.
-        price = self.getStockData(self.__getMicTicker(ticker,mic), end=simDate)['Close'].iloc[-1]
+        try:
+            price = self._getSafePrice(ticker, mic, simDate)
+        except ValueError as e:
+            print(f"ERROR: {str(e)}")
+            return -1
         cost = float(price * quantity)
         query = "UPDATE accounts SET balance = balance + %s WHERE accountId = %s"
         rowsAffected = self.__executeDatabaseQuery(query,(cost,accountId))
@@ -247,7 +280,11 @@ class StockExchange:
             agentId: Optional agent ID for tracking
         '''
         # Fetch current price as of close.
-        price = self.getStockData(self.__getMicTicker(ticker,mic), end=simDate)['Close'].iloc[-1]
+        try:
+            price = self._getSafePrice(ticker, mic, simDate)
+        except ValueError as e:
+            print(f"ERROR: {str(e)}")
+            return -1
         # Calculate total.
         cost = float(price * quantity)
         # Check against balance and deduct.
@@ -328,7 +365,11 @@ class StockExchange:
             0 on success, -1 on failure
         '''
         # Get current price.
-        price = self.getStockData(self.__getMicTicker(ticker, mic), end=simDate)['Close'].iloc[-1]
+        try:
+            price = self._getSafePrice(ticker, mic, simDate)
+        except ValueError as e:
+            print(f"ERROR: {str(e)}")
+            return -1
         proceeds = float(price * quantity)
         
         # Atomically: Reduce quantity only if we have enough
@@ -383,9 +424,29 @@ class StockExchange:
         Returns 0 if succeeded, -1 if failed.
         '''
         # Get current price
-        price = float(self.getStockData(self.__getMicTicker(ticker, mic), end=simDate)['Close'].iloc[-1])
+        try:
+            price = float(self._getSafePrice(ticker, mic, simDate))
+        except ValueError as e:
+            print(f"ERROR: {str(e)}")
+            return -1
         quantity = float(quantity)
         cost_to_buyback = float(price * quantity)
+        
+        # Fetch open short position data for P&L recording
+        query = "SELECT priceAtShort, strategyName, entryDate FROM portfolios " \
+                "WHERE accountId = %s AND ticker = %s AND tradeType = 'short' AND closed IS FALSE"
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(query, (accountId, ticker))
+            position = cursor.fetchone()
+        except:
+            position = None
+        finally:
+            cursor.close()
+        
+        priceAtShort = position[0] if position else None
+        strategyName = position[1] if position else None
+        entryDate = position[2] if position else None
         
         # Atomically: Check if open (closed IS FALSE), deduct quantity, and set closed=TRUE
         # This prevents race conditions where the same short is closed twice
@@ -405,6 +466,21 @@ class StockExchange:
             self.__executeDatabaseQuery(query, (accountId, ticker, mic, quantity, price, simDate))
             
             print(f"Short for {ticker} closed at {price}. Cost to buy back: {cost_to_buyback}")
+            
+            # Record P&L to performance tracker if position data available
+            if self.performanceTracker and strategyName and priceAtShort is not None and entryDate:
+                entryDateStr = entryDate if isinstance(entryDate, str) else entryDate.strftime('%Y-%m-%d')
+                self.recordTradePnL(
+                    accountId,
+                    strategyName,
+                    entryPrice=priceAtShort,
+                    exitPrice=price,
+                    quantity=quantity,
+                    ticker=ticker,
+                    entryDate=entryDateStr,
+                    exitDate=simDate
+                )
+            
             return 0
         else:
             print(f"ERROR: No open short found for {ticker} with sufficient quantity or already closed.")
@@ -545,10 +621,11 @@ class StockExchange:
             
             for ticker, mic, quantity, priceAtShort, strategyName, agentId, entryDate in aged_shorts:
                 # Get current price to calculate exit price
-                current_price = self.getStockData(
-                    self.__getMicTicker(ticker, mic), 
-                    end=currentDate
-                )['Close'].iloc[-1]
+                try:
+                    current_price = self._getSafePrice(ticker, mic, currentDate)
+                except ValueError as e:
+                    print(f"WARNING: {str(e)} - Skipping auto-close for {ticker}")
+                    continue
                 
                 # Auto-close by calling closeShort
                 result = self.closeShort(accountId, ticker, mic, quantity, currentDate)
@@ -598,19 +675,25 @@ class StockExchange:
             return
         
         try:
+            # Convert all numeric types to float to avoid Decimal/float multiplication errors
+            # (database queries return Decimal types for DECIMAL columns)
+            quantity_float = float(quantity)
+            entryPrice_float = float(entryPrice)
+            exitPrice_float = float(exitPrice)
+            
             # Record trade to performance tracker
             self.performanceTracker.recordTrade(
                 strategyName,
-                entryPrice=entryPrice,
-                exitPrice=exitPrice,
-                quantity=int(quantity),
+                entryPrice=entryPrice_float,
+                exitPrice=exitPrice_float,
+                quantity=int(quantity_float),
                 ticker=ticker,
                 entryDate=entryDate,
                 exitDate=exitDate
             )
             
-            pnl = (exitPrice - entryPrice) * quantity
-            pnl_pct = (pnl / (entryPrice * quantity)) * 100 if entryPrice > 0 else 0
+            pnl = (exitPrice_float - entryPrice_float) * quantity_float
+            pnl_pct = (pnl / (entryPrice_float * quantity_float)) * 100 if entryPrice_float > 0 else 0
             print(f"Recorded trade for {strategyName}: {ticker} P&L=${pnl:.2f} ({pnl_pct:.2f}%)")
         
         except Exception as e:

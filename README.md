@@ -18,7 +18,9 @@ Here, the state would be the current state of the stock market.
 The action would be placing a trade for a specific company (and potentially a specific type of trade.)
 Learns a policy over time to effectively maximise profit.
 
-### NLP / NLU for Sentiment Analysis - BERT/FinBERT
+### NLP / NLU for Sentiment Analysis - FinBERT
+
+FinBERT - BERT fine-tuned for financial market sentiment classification: https://github.com/ProsusAI/finBERT.
 
 Potential API for getting historical stock news: https://site.financialmodelingprep.com/developer/docs#stock-news.
 
@@ -52,7 +54,6 @@ The EMA means the agent can quickly detect trend changes that the naive MA would
 ### Relative Strength Index (RSI)
 
 RSI measures the magnitude of price changes to determine if a stock is 'oversold' or 'overbought'. The RSI can be between 0 and 100.
-
 
 > RS = average gain/average loss
 

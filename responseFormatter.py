@@ -13,34 +13,55 @@ class ResponseFormatter:
     @staticmethod
     def formatPortfolioSummary(portfolio: Dict[str, Any], balance: float) -> str:
         """
-        Format portfolio holdings into readable text.
+        Format portfolio holdings as markdown table with current prices and P&L.
         
         Args:
-            portfolio: Dict with held positions {ticker: {quantity, entryPrice, tradeType}}
+            portfolio: Dict with held positions {ticker: {long/short, longEntryPrice, longCurrentPrice, etc}}
             balance: Current account balance
         
         Returns:
-            Formatted portfolio summary string
+            Formatted portfolio summary string (markdown table)
         """
         if not portfolio:
             return f"Your portfolio is empty. Current balance: ${balance:,.2f}"
         
-        lines = [f"Portfolio Summary (Cash Balance: ${balance:,.2f})"]
-        lines.append("=" * 50)
+        # Calculate total value of long holdings (excluding shorts)
+        total_holdings_value = 0.0
+        for ticker, positions in portfolio.items():
+            long_qty = positions.get('long', 0)
+            if long_qty > 0:
+                current_price = float(positions.get('longCurrentPrice', 0))
+                total_holdings_value += current_price * float(long_qty)
+        
+        total_standing = float(balance) + total_holdings_value
+        
+        lines = []
+        lines.append(f"Total Standing: ${total_standing:,.2f}")
+        lines.append(f"Cash: ${balance:,.2f}")
+        lines.append(f"Holdings Value: ${total_holdings_value:,.2f}")
+        lines.append("")
+        
+        # Markdown table header
+        lines.append("| Position | Qty | Entry Price | Current Price | P&L $ | P&L % |")
+        lines.append("|---|---|---|---|---|---|")
         
         for ticker, positions in portfolio.items():
             long_qty = positions.get('long', 0)
             short_qty = positions.get('short', 0)
             
             if long_qty > 0:
-                entry_price = positions.get('longEntryPrice', 0)
-                lines.append(f"\nLONG: {ticker} x{long_qty} @ ${entry_price:.2f}")
+                entry_price = float(positions.get('longEntryPrice', 0))
+                current_price = float(positions.get('longCurrentPrice', entry_price))
+                pnl = (current_price - entry_price) * float(long_qty)
+                pnl_pct = ((current_price - entry_price) / entry_price * 100) if entry_price != 0 else 0
+                lines.append(f"| LONG {ticker} | {long_qty} | ${entry_price:.2f} | ${current_price:.2f} | ${pnl:,.2f} | {pnl_pct:+.2f}% |")
             
             if short_qty > 0:
-                entry_price = positions.get('shortEntryPrice', 0)
-                lines.append(f"SHORT: {ticker} x{short_qty} @ ${entry_price:.2f}")
-            
-            lines.append("-" * 50)
+                entry_price = float(positions.get('shortEntryPrice', 0))
+                current_price = float(positions.get('shortCurrentPrice', entry_price))
+                pnl = (entry_price - current_price) * float(short_qty)
+                pnl_pct = ((entry_price - current_price) / entry_price * 100) if entry_price != 0 else 0
+                lines.append(f"| SHORT {ticker} | {short_qty} | ${entry_price:.2f} | ${current_price:.2f} | ${pnl:,.2f} | {pnl_pct:+.2f}% |")
         
         return "\n".join(lines)
     
@@ -76,20 +97,25 @@ class ResponseFormatter:
     @staticmethod
     def formatRecentTrades(trades: List[Dict[str, Any]], limit: int = 10) -> str:
         """
-        Format recent trades into readable list.
+        Format recent trades as markdown table.
         
         Args:
             trades: List of trade dicts {strategy, ticker, action, quantity, confidence, timestamp}
             limit: Max trades to display
         
         Returns:
-            Formatted recent trades
+            Formatted recent trades (markdown table)
         """
         if not trades:
             return "No recent trades."
         
-        lines = [f"Recent Trades (last {min(limit, len(trades))})"]
-        lines.append("-" * 60)
+        lines = []
+        lines.append(f"Recent Trades (last {min(limit, len(trades))})")
+        lines.append("")
+        
+        # Markdown table header
+        lines.append("| Timestamp | Action | Ticker | Qty | Confidence | Strategy |")
+        lines.append("|---|---|---|---|---|---|")
         
         for trade in trades[-limit:]:
             action_str = trade.get('action', 'HOLD').upper()
@@ -99,10 +125,7 @@ class ResponseFormatter:
             strategy = trade.get('strategy', 'Unknown')
             timestamp = trade.get('timestamp', '?')
             
-            lines.append(
-                f"[{timestamp}] {action_str} {ticker} x{qty} "
-                f"({confidence:.0f}% conf) via {strategy}"
-            )
+            lines.append(f"| {timestamp} | {action_str} | {ticker} | {qty} | {confidence:.0f}% | {strategy} |")
         
         return "\n".join(lines)
     

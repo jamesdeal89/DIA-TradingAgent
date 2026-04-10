@@ -18,7 +18,7 @@ load_dotenv()
 # This decorator makes the function only run once.
 # The objects returned are stored in Streamlit's cache.
 @st.cache_resource
-def initNLP():
+def initialiseNLP():
     intents = nlp.readIntentsCSV()
     xTrainTf, countVect, tfTransformer = nlp.stemmingVectorisationWeighting(intents)
     indexWithNorms = nlp.genInvertedIndex(countVect, xTrainTf)
@@ -27,12 +27,12 @@ def initNLP():
 def getRunningAgents():
     return st.session_state.get('activeAgents', {})
 
-def initStockExchange():
+def initialiseStockExchange():
     return StockExchange()
 
 def runAgentTradeLoop(accountId, agentData, exchange):
     """
-    Background trading loop: at each timestep, agent analyzes all stocks in its market.
+    Background trading loop: at each timestep, agent analyses all stocks in its market.
     All strategy logic handled within agent.runTimestep().
     """
     mic = agentData.get('mic', 'XNAS')
@@ -40,8 +40,12 @@ def runAgentTradeLoop(accountId, agentData, exchange):
     
     print(f"DEBUG: Trade loop started for agent {accountId} on {mic}")
     
+    # Get dataset max date once at startup
+    maxNewsDate = exchange.getMaxNewsDate()
+    todayDate = datetime.now().strftime('%Y-%m-%d')
+    
     while agentData.get('threadRunning', True):
-        simSpeed = agentData.get('simSpeed', 1)
+        isRealtimeMode = agentData.get('isRealtimeMode', False)
         
         if not agentData.get('threadActive', True):
             time.sleep(0.5)
@@ -49,25 +53,57 @@ def runAgentTradeLoop(accountId, agentData, exchange):
         
         try:
             agent = agentData['agent']
-            simDate = agent.simDate  
+            simDate = agent.simDate
+            
+            # Check simulation boundaries
+            if isRealtimeMode:
+                # Realtime mode: only simulate on current date
+                currentRealDate = datetime.now().strftime('%Y-%m-%d')
+                if simDate != currentRealDate:
+                    agent.setSimDate(currentRealDate)
+                    simDate = currentRealDate
+            else:
+                # Check if we've reached the max news date or today
+                hasReachedLimit = False
+                if maxNewsDate and simDate >= maxNewsDate:
+                    print(f"DEBUG: Simulation reached max news date ({maxNewsDate}). Stopping agent.")
+                    hasReachedLimit = True
+                elif simDate >= todayDate:
+                    print(f"DEBUG: Simulation reached today's date ({todayDate}). Stopping agent.")
+                    hasReachedLimit = True
+                
+                if hasReachedLimit:
+                    agentData['threadActive'] = False
+                    agentData['threadRunning'] = False
+                    print(f"DEBUG: Agent {accountId} simulation ended.")
+                    break
+            
             print(f"DEBUG: Agent {accountId} timestep {timestep_count} on {simDate}")
             agent.runTimestep(exchange, simDate)
             
-            # Auto-advance date
-            nextDate = (datetime.strptime(simDate, '%Y-%m-%d') + timedelta(days=simSpeed)).strftime('%Y-%m-%d')
-            agent.setSimDate(nextDate)
+            # Auto-advance date (skip in realtime mode)
+            if not isRealtimeMode:
+                # Advance by decision period
+                # This naturally spaces out timesteps based on decision period
+                decisionPeriod = agent.getDecisionPeriod()
+                nextDate = (datetime.strptime(simDate, '%Y-%m-%d') + timedelta(days=decisionPeriod)).strftime('%Y-%m-%d')
+                agent.setSimDate(nextDate)
             
             timestep_count += 1
         except Exception as e:
             print(f"DEBUG: Agent {accountId} timestep error - {e}")
         
-        sleep_seconds = 2.0 / simSpeed
+        # Adjust sleep based on mode
+        if isRealtimeMode:
+            sleep_seconds = 5.0  # Check every 5 seconds in realtime mode
+        else:
+            sleep_seconds = 2.0  # Check every 2 seconds in historical mode
         time.sleep(sleep_seconds)
     
     print(f"DEBUG: Trade loop ended for agent {accountId}")
 
-def startAgent(mic, prefStrategy, bannedList, simDate=None, simSpeed=1):
-    exchange = initStockExchange()
+def startAgent(mic, prefStrategy, bannedList, simDate=None, decisionPeriod=1, isRealtimeMode=False):
+    exchange = initialiseStockExchange()
     
     try:
         if 'activeAgents' not in st.session_state:
@@ -80,13 +116,17 @@ def startAgent(mic, prefStrategy, bannedList, simDate=None, simSpeed=1):
         preferred = prefStrategy if prefStrategy and prefStrategy != "None" else None
         if simDate is None:
             simDate = datetime.now().strftime('%Y-%m-%d')
+        if isRealtimeMode:
+            simDate = datetime.now().strftime('%Y-%m-%d')
+        
         agent = Agent(
             agentId=accountId,
             accountId=accountId,
             mic=mic,
             preferredStrategy=preferred,
             bannedStrategies=bannedList,
-            simDate=simDate
+            simDate=simDate,
+            decisionPeriod=decisionPeriod
         )
         
         st.session_state.activeAgents[accountId] = {
@@ -95,7 +135,8 @@ def startAgent(mic, prefStrategy, bannedList, simDate=None, simSpeed=1):
             'prefStrategy': preferred,
             'banned': bannedList,
             'simDate': simDate,
-            'simSpeed': simSpeed,
+            'decisionPeriod': decisionPeriod,
+            'isRealtimeMode': isRealtimeMode,
             'threadRunning': True,
             'threadActive': True
         }
@@ -109,7 +150,7 @@ def startAgent(mic, prefStrategy, bannedList, simDate=None, simSpeed=1):
         agentData['thread'] = tradeThread
         tradeThread.start()
         
-        print(f"DEBUG: Agent {accountId} started with simDate={simDate}, simSpeed={simSpeed}x, thread running")
+        print(f"DEBUG: Agent {accountId} started with simDate={simDate}, decision period={decisionPeriod}d, isRealtime={isRealtimeMode}, thread running")
         return accountId
     except Exception as e:
         print(f'Error starting agent: {e}')
@@ -118,8 +159,8 @@ def startAgent(mic, prefStrategy, bannedList, simDate=None, simSpeed=1):
 
 # Runs for any GUI refresh event, e.g. initial load, input, UI interaction.
 def chatGUI():
-    # Loads cached NLP objects (cached due to decorator on initNLP())
-    indexWithNorms, countVect, tfTransformer, intents = initNLP()
+    # Loads cached NLP objects (cached due to decorator on initialiseNLP())
+    indexWithNorms, countVect, tfTransformer, intents = initialiseNLP()
 
     # States for navigation.
     if "activeAgentId" not in st.session_state:
@@ -135,8 +176,11 @@ def chatGUI():
         if not agents:
             st.write("No running agents.")
         for accountId, agentData in agents.items():
+            decisionPeriod = agentData.get('decisionPeriod', 1)
+            isRealtimeMode = agentData.get('isRealtimeMode', False)
+            modeStr = "realtime" if isRealtimeMode else f"historical"
             column1, column2 = st.columns([3,1])
-            column1.write(f"Agent {accountId} | Market: {agentData['mic']}")
+            column1.write(f"Agent {accountId} | Market: {agentData['mic']} | Mode: {modeStr} | Decision Period: {decisionPeriod}d")
             if column2.button(f"Chat with Agent {accountId}", key=f"btn{accountId}"):
                 st.session_state.activeAgentId = accountId
                 st.rerun()
@@ -148,20 +192,34 @@ def chatGUI():
             mic = st.selectbox("Market (MIC)", ["XLON", "XNAS", "XHKG", "XJPX"])
             prefStrategy = st.selectbox("Preferred strategy (optional)", ["None", "Sentiment", "MeanReversion", "Technical", "Fundamental"])
             banned = st.multiselect("Banned strategies (optional)", ["Sentiment", "MeanReversion", "Technical", "Fundamental"])
-            simDate = st.date_input("Simulation start date", value=datetime(2011, 1, 1), min_value=datetime(1990, 1, 1), max_value=datetime.now())
-            simSpeed = st.selectbox("Simulation speed", [1, 5, 10, 20], format_func=lambda x: f"{x}x speed")
+            
+            # Simulation mode selection
+            simMode = st.radio("Simulation mode", ["Historical (backtest)", "Realtime (live)"], horizontal=True)
+            isRealtimeMode = (simMode == "Realtime (live)")
+            
+            if isRealtimeMode:
+                st.info("Realtime mode: Agent uses today's date and trades on current stock data. Start date is not applicable.")
+                simDate = datetime.now()
+            else:
+                with st.container(border=True):
+                    st.caption("Historical Simulation Settings")
+                    simDate = st.date_input("Simulation start date", value=datetime(2011, 1, 1), min_value=datetime(1990, 1, 1), max_value=datetime.now())
+            
+            decisionPeriod = st.slider("Decision period (days)", min_value=1, max_value=60, value=1, step=1, help="Make trading decisions every N days instead of daily. Helps reduce noise by analyzing larger time windows.")
+            
             if st.form_submit_button("Start Agent"):
-                simDateStr = simDate.strftime('%Y-%m-%d')
-                accountId = startAgent(mic, prefStrategy, banned, simDateStr, simSpeed)
+                simDateStr = simDate.strftime('%Y-%m-%d') if not isinstance(simDate, str) else simDate
+                accountId = startAgent(mic, prefStrategy, banned, simDateStr, decisionPeriod, isRealtimeMode)
                 if accountId:
-                    st.success(f"Agent created with account ID: {accountId} (simDate: {simDateStr}, speed: {simSpeed}x)")
+                    mode_display = "realtime" if isRealtimeMode else "historical"
+                    st.success(f"Agent created with account ID: {accountId} (mode: {mode_display}, decision period: {decisionPeriod}d)")
                     st.rerun()
                 else:
                     st.error("Failed to create agent")
 
     else:
         # Conversational view for a specific agent.
-        exchange = initStockExchange()
+        exchange = initialiseStockExchange()
         aId = st.session_state.activeAgentId
         messagesKey = f"messages{aId}"
 
@@ -172,32 +230,36 @@ def chatGUI():
         agentData = st.session_state.activeAgents.get(aId)
         # Read simDate directly from agent object to always stay in sync
         simDate = agentData['agent'].simDate if agentData and 'agent' in agentData else datetime.now().strftime('%Y-%m-%d')
-        simSpeed = agentData.get('simSpeed', 1) if agentData else 1
         threadActive = agentData.get('threadActive', True) if agentData else False
         
         st.title(f"Trading Agent {st.session_state.activeAgentId} Chat")
 
-        # Show notification only after user manually advances day.
-        advanceNoticeKey = f"simDateAdvanceNotice_{aId}"
-        if advanceNoticeKey in st.session_state:
-            st.info(f"Simulation date updated to {st.session_state[advanceNoticeKey]}")
-            del st.session_state[advanceNoticeKey]
+        # Get current decision period info
+        currentDecisionPeriod = agentData['agent'].getDecisionPeriod() if agentData and 'agent' in agentData else 1
+        isRealtimeMode = agentData.get('isRealtimeMode', False) if agentData else False
         
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.caption("Sim Speed")
-            st.write(f"{simSpeed}x")
+            st.caption("Mode")
+            if isRealtimeMode:
+                st.write("REALTIME")
+            else:
+                st.write("HISTORICAL")
         with col2:
+            st.caption("Decision Period")
+            st.write(f"{currentDecisionPeriod} days")
+        with col3:
             st.caption("Status")
             statusText = "ACTIVE" if threadActive else "PAUSED"
             st.write(statusText)
-        with col3:
-            if st.button("Advance 1 Day"):
-                currentAgentDate = agentData['agent'].simDate
-                nextDate = (datetime.strptime(currentAgentDate, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
-                agentData['agent'].setSimDate(nextDate)
-                st.session_state[advanceNoticeKey] = nextDate
-                st.rerun()
+        
+        # Adjust decision period slider
+        st.write("**Adjust Decision Period:**")
+        newDecisionPeriod = st.slider("Decision period (days)", min_value=1, max_value=60, value=currentDecisionPeriod, step=1, key="dp_slider", help="Update the decision period. Agent will make trading decisions every N days.")
+        if newDecisionPeriod != currentDecisionPeriod:
+            agentData['agent'].setDecisionPeriod(newDecisionPeriod)
+            st.session_state.activeAgents[aId]['decisionPeriod'] = newDecisionPeriod
+            st.success(f"Decision period updated to {newDecisionPeriod} days")
         
         controlCol1, controlCol2, controlCol3 = st.columns(3)
         with controlCol1:
@@ -219,7 +281,7 @@ def chatGUI():
         # Initialise a chat history.
         if messagesKey not in st.session_state:
             st.session_state[messagesKey] = []
-            greeting = "Hi! Shall we get started with trading stocks?"
+            greeting = "Ready to start trading."
             st.session_state[messagesKey].append({"role":"ai", "content": greeting})
 
         # Note: this is just the current session, the chat window will be wiped on refresh (backend data / agent not wiped, just chats.)
@@ -264,15 +326,32 @@ def chatGUI():
                             for _, row in portfolio.iterrows():
                                 ticker = row.get('ticker')
                                 tradeType = row.get('tradeType')
+                                mic = row.get('mic', agent.mic)  # Get MIC from portfolio or use agent's MIC
                                 if ticker:
                                     if ticker not in portfolioDict:
-                                        portfolioDict[ticker] = {}
+                                        portfolioDict[ticker] = {'mic': mic}
                                     if tradeType == 'long':
-                                        portfolioDict[ticker]['long'] = row.get('quantity', 0)
-                                        portfolioDict[ticker]['longEntryPrice'] = row.get('entryPrice', 0)
+                                        entry_price = row.get('entryPrice', 0)
+                                        qty = row.get('quantity', 0)
+                                        # Get current price
+                                        try:
+                                            current_price = exchange.getCurrentPrice(ticker, mic, agent.simDate)
+                                        except:
+                                            current_price = entry_price  # Fall back to entry price if error
+                                        portfolioDict[ticker]['long'] = qty
+                                        portfolioDict[ticker]['longEntryPrice'] = entry_price
+                                        portfolioDict[ticker]['longCurrentPrice'] = current_price
                                     elif tradeType == 'short':
-                                        portfolioDict[ticker]['short'] = row.get('quantity', 0)
-                                        portfolioDict[ticker]['shortEntryPrice'] = row.get('priceAtShort', 0)
+                                        entry_price = row.get('priceAtShort', 0)
+                                        qty = row.get('quantity', 0)
+                                        # Get current price
+                                        try:
+                                            current_price = exchange.getCurrentPrice(ticker, mic, agent.simDate)
+                                        except:
+                                            current_price = entry_price  # Fall back to entry price if error
+                                        portfolioDict[ticker]['short'] = qty
+                                        portfolioDict[ticker]['shortEntryPrice'] = entry_price
+                                        portfolioDict[ticker]['shortCurrentPrice'] = current_price
                         response = ResponseFormatter.formatPortfolioSummary(portfolioDict, balance)
 
             # Bot response

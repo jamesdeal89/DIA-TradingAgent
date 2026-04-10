@@ -8,3 +8,6 @@ kagglehub
 transformers
 datasets
 torch
+numpy
+pandas
+torch

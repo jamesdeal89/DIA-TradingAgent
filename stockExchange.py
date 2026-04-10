@@ -93,7 +93,7 @@ class StockExchange:
                 user=os.getenv("DBUSER"),
                 passwd=os.getenv("DBPASS")
             )    
-            print("MySQL Database connection successful.")
+            print("MySQL database connection established.")
         except Error as e:
             print(f'Error: {e}')
         return connection
@@ -110,7 +110,7 @@ class StockExchange:
             else:
                 cursor.execute(query)
             self.connection.commit()
-            print("Database query successful!")
+            print("Database query executed.")
             # Useful to check if updates worked.
             return cursor.rowcount
         except Error as e:
@@ -602,7 +602,7 @@ class StockExchange:
                 {
                     'headline': str,        # Full headline text
                     'sentiment': str,       # 'positive', 'neutral', or 'negative'
-                    'score': float,         # Normalized score [-1.0, +1.0]
+                    'score': float,         # Normalised score [-1.0, +1.0]
                     'url': str,             # Article URL
                     'date': str,            # Publication date (YYYY-MM-DD)
                     'publisher': str        # News source
@@ -648,6 +648,62 @@ class StockExchange:
         except Exception as e:
             print(f"ERROR querying news for {ticker}: {e}")
             return []
+    
+    def getMaxNewsDate(self) -> str:
+        '''
+        Get the latest date available in the news_headlines dataset.
+        
+        Returns:
+            Latest date as YYYY-MM-DD string, or None if dataset is empty.
+        '''
+        query = "SELECT MAX(date) FROM news_headlines"
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(query)
+            result = cursor.fetchone()
+            if result and result[0]:
+                return str(result[0])
+            else:
+                print("WARNING: No news data found in database.")
+                return None
+        except Exception as e:
+            print(f"ERROR querying max news date: {e}")
+            return None
+        finally:
+            cursor.close()
+    
+    def isValidSimulationDate(self, simDate: str) -> bool:
+        '''
+        Check if a simulation date is within valid bounds.
+        Valid means: not in the future AND within the news_headlines dataset range.
+        
+        Args:
+            simDate: Date string in YYYY-MM-DD format
+        
+        Returns:
+            True if date is valid, False otherwise
+        '''
+        try:
+            sim_date_obj = datetime.strptime(simDate, '%Y-%m-%d')
+            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            
+            # Check if date is in future
+            if sim_date_obj > today:
+                print(f"WARNING: Simulation date {simDate} is in the future. Setting to today.")
+                return False
+            
+            # Check if date is within news dataset
+            max_news_date = self.getMaxNewsDate()
+            if max_news_date:
+                max_date_obj = datetime.strptime(max_news_date, '%Y-%m-%d')
+                if sim_date_obj > max_date_obj:
+                    print(f"WARNING: Simulation date {simDate} exceeds dataset limit {max_news_date}.")
+                    return False
+            
+            return True
+        except ValueError:
+            print(f"ERROR: Invalid date format {simDate}. Expected YYYY-MM-DD.")
+            return False
 
 
 

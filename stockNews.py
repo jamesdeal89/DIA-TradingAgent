@@ -13,18 +13,18 @@ Architecture:
 5. Populate MySQL news_headlines table in StockExchange
 
 Usage:
-    from stockNews import NewsAnalyzer, initializeNewsDatabase
+    from stockNews import NewsAnalyser, initialiseNewsDatabase
     from stockExchange import StockExchange
     
-    # Initialize
-    analyzer = NewsAnalyzer()
+    # Initialise
+    analyser = NewsAnalyser()
     exchange = StockExchange()
     
     # Fine-tune FinBERT once (cached after first run)
-    analyzer.fineTune()
+    analyser.fineTune()
     
     # Populate MySQL with sentiment data
-    initializeNewsDatabase(exchange, analyzer)
+    initialiseNewsDatabase(exchange, analyser)
     
     # Query headlines during simulation
     news_metrics = exchange.getNewsForStock('AAPL', 'XNAS', '2015-01-15')
@@ -56,7 +56,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 
-class NewsAnalyzer:
+class NewsAnalyser:
     """
     Sentiment analysis engine using fine-tuned FinBERT model.
     
@@ -77,7 +77,7 @@ class NewsAnalyzer:
     
     def __init__(self, batch_size: int = 16, num_epochs: int = 3):
         """
-        Initialize NewsAnalyzer.
+        Initialise NewsAnalyser.
         
         Args:
             batch_size: Batch size for fine-tuning (reduce if memory-constrained)
@@ -90,13 +90,13 @@ class NewsAnalyzer:
         self.pipeline = None
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
-        logger.info(f"NewsAnalyzer initialized. Using device: {self.device}")
+        logger.info(f"NewsAnalyser initialised. Using device: {self.device}")
         logger.info(f"Batch size: {batch_size}, Epochs: {num_epochs}")
         
-        # Load or initialize model
-        self._load_or_init_model()
+        # Load or initialise model
+        self._loadOrInitModel()
     
-    def _load_or_init_model(self):
+    def _loadOrInitModel(self):
         """Load fine-tuned model if exists, otherwise load pre-trained FinBERT."""
         if os.path.exists(self.FINE_TUNED_PATH):
             logger.info(f"Loading fine-tuned model from {self.FINE_TUNED_PATH}")
@@ -119,7 +119,7 @@ class NewsAnalyzer:
         Classify sentiment of a single headline.
         
         Args:
-            headline: Text of the headline to analyze
+            headline: Text of the headline to analyse
             
         Returns:
             Dict with keys:
@@ -134,7 +134,7 @@ class NewsAnalyzer:
             label = result[0]['label']
             model_score = float(result[0]['score'])
             
-            # Normalize to [-1, 1] range
+            # Normalise to [-1, 1] range
             if label == 'positive':
                 score = model_score
             elif label == 'negative':
@@ -301,7 +301,7 @@ def download_and_extract_kaggle_data() -> bool:
     Returns:
         True if successful, False otherwise
     """
-    output_file = NewsAnalyzer.RAW_HEADLINES_FILE
+    output_file = NewsAnalyser.RAW_HEADLINES_FILE
     
     # Check if already extracted
     if os.path.exists(output_file):
@@ -345,7 +345,7 @@ def download_and_extract_kaggle_data() -> bool:
                         if publisher.lower() == 'benzinga':
                             continue
                         
-                        # Normalize date to YYYY-MM-DD
+                        # Normalise date to YYYY-MM-DD
                         try:
                             date_obj = pd.to_datetime(date_str)
                             date_str = date_obj.strftime('%Y-%m-%d')
@@ -383,29 +383,29 @@ def download_and_extract_kaggle_data() -> bool:
         return False
 
 
-def initializeNewsDatabase(stockExchange, news_analyzer: NewsAnalyzer) -> bool:
+def initialiseNewsDatabase(stockExchange, newsAnalyser: NewsAnalyser) -> bool:
     """
     Populate MySQL news_headlines table with extracted headlines and sentiment scores.
     
     Args:
         stockExchange: StockExchange instance with MySQL connection
-        news_analyzer: NewsAnalyzer instance with sentiment cache
+        news_analyser: NewsAnalyser instance with sentiment cache
         
     Returns:
         True if successful, False otherwise
     """
     # Check if raw headlines and sentiments exist
-    if not os.path.exists(NewsAnalyzer.RAW_HEADLINES_FILE):
-        logger.error(f"{NewsAnalyzer.RAW_HEADLINES_FILE} not found. Run download_and_extract_kaggle_data() first.")
+    if not os.path.exists(NewsAnalyser.RAW_HEADLINES_FILE):
+        logger.error(f"{NewsAnalyser.RAW_HEADLINES_FILE} not found. Run download_and_extract_kaggle_data() first.")
         return False
     
-    if not os.path.exists(NewsAnalyzer.SENTIMENTS_CACHE):
-        logger.error(f"{NewsAnalyzer.SENTIMENTS_CACHE} not found. Run news_analyzer.generateSentimentCache() first.")
+    if not os.path.exists(NewsAnalyser.SENTIMENTS_CACHE):
+        logger.error(f"{NewsAnalyser.SENTIMENTS_CACHE} not found. Run news_analyser.generateSentimentCache() first.")
         return False
     
     # Load data
-    headlines_df = pd.read_csv(NewsAnalyzer.RAW_HEADLINES_FILE)
-    sentiments_df = pd.read_csv(NewsAnalyzer.SENTIMENTS_CACHE)
+    headlines_df = pd.read_csv(NewsAnalyser.RAW_HEADLINES_FILE)
+    sentiments_df = pd.read_csv(NewsAnalyser.SENTIMENTS_CACHE)
     
     # Merge on index
     merged_df = headlines_df.merge(sentiments_df, on='index', how='inner')
@@ -472,14 +472,14 @@ if __name__ == "__main__":
         logger.error("Failed to download/extract Kaggle data. Exiting.")
         exit(1)
     
-    # Step 2: Initialize NewsAnalyzer and fine-tune (or load cached)
+    # Step 2: Initialise NewsAnalyser and fine-tune (or load cached)
     logger.info("\n=== STEP 2: Fine-tune FinBERT ===")
-    analyzer = NewsAnalyzer(batch_size=16, num_epochs=3)
-    analyzer.fineTune()
+    analyser = NewsAnalyser(batch_size=16, num_epochs=3)
+    analyser.fineTune()
     
     # Step 3: Generate sentiment cache
     logger.info("\n=== STEP 3: Generate Sentiment Cache ===")
-    if analyzer.generateSentimentCache():
+    if analyser.generateSentimentCache():
         logger.info("Sentiment cache generated successfully")
     else:
         logger.info("Sentiment cache already exists or error occurred")
@@ -489,12 +489,12 @@ if __name__ == "__main__":
     try:
         from stockExchange import StockExchange
         exchange = StockExchange()
-        if initializeNewsDatabase(exchange, analyzer):
+        if initialiseNewsDatabase(exchange, analyser):
             logger.info("MySQL database populated successfully")
         else:
             logger.error("Failed to populate MySQL database")
     except Exception as e:
-        logger.warning(f"Could not initialize database: {e}")
-        logger.info("You can call initializeNewsDatabase(exchange, analyzer) manually later")
+        logger.warning(f"Could not initialise database: {e}")
+        logger.info("You can call initialiseNewsDatabase(exchange, analyser) manually later")
     
     logger.info("\n=== Pipeline Complete ===")

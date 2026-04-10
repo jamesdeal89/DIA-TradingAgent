@@ -29,18 +29,18 @@ logger = logging.getLogger(__name__)
 class TradingStrategy(ABC):
     """
     Abstract base class for all trading strategies.
-    Each strategy implements analyze() to return a trade recommendation.
+    Each strategy implements analyse() to return a trade recommendation.
     """
     
     def __init__(self, name: str, version: str = "1.0"):
-        """Initialize strategy with name and version."""
+        """Initialise strategy with name and version."""
         self.name = name
         self.version = version
     
     @abstractmethod
-    def analyze(self, ticker: str, mic: str, simDate: str, exchange) -> Dict[str, Any]:
+    def analyse(self, ticker: str, mic: str, simDate: str, exchange) -> Dict[str, Any]:
         """
-        Analyze a stock and return a trade recommendation.
+        analyse a stock and return a trade recommendation.
         
         Args:
             ticker: Stock ticker symbol (e.g., 'AAPL')
@@ -73,14 +73,18 @@ class SentimentStrategy(TradingStrategy):
     """
     Analyses news sentiment to make trading decisions.
     Positive sentiment -> long, Negative sentiment -> short, Neutral -> hold.
+    Aggregates sentiment over the analysis period for more robust signals.
     """
     
     def __init__(self):
         super().__init__(name="Sentiment", version="1.0")
     
-    def analyze(self, ticker: str, mic: str, simDate: str, exchange) -> Dict[str, Any]:
+    def analyse(self, ticker: str, mic: str, simDate: str, exchange, analysisPeriod: int = 1) -> Dict[str, Any]:
         """
-        Analyze news sentiment for the ticker on simDate.
+        Analyse news sentiment for the ticker over analysisPeriod days.
+        
+        Args:
+            analysisPeriod: Number of days to aggregate sentiment over
         
         Returns:
             - LONG if average sentiment is positive (score > 0.2)
@@ -88,45 +92,56 @@ class SentimentStrategy(TradingStrategy):
             - HOLD if neutral
         """
         try:
-            headlines = exchange.getNewsForStock(ticker, mic, simDate)
+            from datetime import datetime, timedelta
             
-            if not headlines:
+            # Gather sentiment data over the analysis period
+            all_scores = []
+            headline_count = 0
+            
+            for day_offset in range(analysisPeriod):
+                current_date = (datetime.strptime(simDate, '%Y-%m-%d') - timedelta(days=day_offset)).strftime('%Y-%m-%d')
+                headlines = exchange.getNewsForStock(ticker, mic, current_date)
+                if headlines:
+                    scores = [h.get('score', 0.0) for h in headlines]
+                    all_scores.extend(scores)
+                    headline_count += len(headlines)
+            
+            if not all_scores:
                 return {
                     'action': 'hold',
                     'confidence': 0.3,
-                    'reason': 'No news data available',
+                    'reason': f'No news data available over {analysisPeriod} days',
                     'targetQuantity': 0
                 }
             
-            # Calculate average sentiment score
-            scores = [h.get('score', 0.0) for h in headlines]
-            avg_score = sum(scores) / len(scores) if scores else 0.0
+            # Calculate average sentiment score across all collected headlines
+            avg_score = sum(all_scores) / len(all_scores) if all_scores else 0.0
             
             # Determine action based on sentiment
             if avg_score > 0.2:
                 return {
                     'action': 'long',
                     'confidence': min(0.95, abs(avg_score)),
-                    'reason': f'Positive sentiment ({avg_score:.2f}) from {len(headlines)} headlines',
+                    'reason': f'Positive sentiment ({avg_score:.2f}) from {headline_count} headlines over {analysisPeriod} days',
                     'targetQuantity': 1
                 }
             elif avg_score < -0.2:
                 return {
                     'action': 'short',
                     'confidence': min(0.95, abs(avg_score)),
-                    'reason': f'Negative sentiment ({avg_score:.2f}) from {len(headlines)} headlines',
+                    'reason': f'Negative sentiment ({avg_score:.2f}) from {headline_count} headlines over {analysisPeriod} days',
                     'targetQuantity': 1
                 }
             else:
                 return {
                     'action': 'hold',
                     'confidence': 0.5,
-                    'reason': f'Neutral sentiment ({avg_score:.2f})',
+                    'reason': f'Neutral sentiment ({avg_score:.2f}) from {headline_count} headlines over {analysisPeriod} days',
                     'targetQuantity': 0
                 }
         
         except Exception as e:
-            logger.warning(f"SentimentStrategy.analyze() failed: {e}")
+            logger.warning(f"SentimentStrategy.analyse() failed: {e}")
             return {
                 'action': 'hold',
                 'confidence': 0.0,
@@ -139,7 +154,8 @@ class SentimentStrategy(TradingStrategy):
 
 class MeanReversionStrategy(TradingStrategy):
     """
-    Trades based on price deviation from mean (20-day moving average).
+    Trades based on price deviation from mean.
+    Dynamically scales lookback window based on analysisPeriod.
     If price < mean - 2*std LONG (buy the dip)
     If price > mean + 2*std SHORT (sell the peak)
     """
@@ -147,25 +163,32 @@ class MeanReversionStrategy(TradingStrategy):
     def __init__(self):
         super().__init__(name="MeanReversion", version="1.0")
     
-    def analyze(self, ticker: str, mic: str, simDate: str, exchange) -> Dict[str, Any]:
+    def analyse(self, ticker: str, mic: str, simDate: str, exchange, analysisPeriod: int = 1) -> Dict[str, Any]:
         """
-        Calculate if stock is above/below mean and trigger accordingly.
+        Calculate if stock is above/below mean over analysisPeriod.
+        
+        Args:
+            analysisPeriod: Window size for calculating mean and std (default 20, scales up with decision period)
         """
         try:
-            # Get 60 days of historical data leading up to simDate
+            # Scale lookback window based on analysis period
+            lookback_window = max(20, analysisPeriod)
+            required_history = lookback_window + 5  # Get extra data for safety
+            
+            # Get historical data leading up to simDate
             suffixedTicker = exchange.getMicTicker(ticker, mic)
             data = exchange.getStockData(suffixedTicker, start=None, end=simDate)
             
-            if data is None or len(data) < 20:
+            if data is None or len(data) < lookback_window:
                 return {
                     'action': 'hold',
                     'confidence': 0.2,
-                    'reason': 'Insufficient historical data (< 20 days)',
+                    'reason': f'Insufficient historical data (< {lookback_window} days)',
                     'targetQuantity': 0
                 }
             
-            # Calculate 20-day moving average and std deviation
-            close_prices = data['Close'].tail(20)
+            # Calculate moving average and std deviation over the scaled window
+            close_prices = data['Close'].tail(lookback_window)
             mean_price = close_prices.mean()
             std_price = close_prices.std()
             current_price = close_prices.iloc[-1]
@@ -173,31 +196,33 @@ class MeanReversionStrategy(TradingStrategy):
             # Calculate z-score (how many std devs away from mean)
             z_score = (current_price - mean_price) / std_price if std_price > 0 else 0
             
-            # Trading logic
-            if z_score < -2.0:  # Price is 2+ std devs below mean
+            # Trading logic (threshold adjusts with period to reduce false signals)
+            threshold = 1.5 if analysisPeriod > 10 else 2.0
+            
+            if z_score < -threshold:  # Price is threshold+ std devs below mean
                 return {
                     'action': 'long',
                     'confidence': min(0.9, 0.5 + abs(z_score) * 0.15),
-                    'reason': f'Price {current_price:.2f} is {abs(z_score):.2f}sd below mean {mean_price:.2f}',
+                    'reason': f'Price {current_price:.2f} is {abs(z_score):.2f}sd below {lookback_window}d mean {mean_price:.2f}',
                     'targetQuantity': 1
                 }
-            elif z_score > 2.0:  # Price is 2+ std devs above mean
+            elif z_score > threshold:  # Price is threshold+ std devs above mean
                 return {
                     'action': 'short',
                     'confidence': min(0.9, 0.5 + abs(z_score) * 0.15),
-                    'reason': f'Price {current_price:.2f} is {abs(z_score):.2f}sd above mean {mean_price:.2f}',
+                    'reason': f'Price {current_price:.2f} is {abs(z_score):.2f}sd above {lookback_window}d mean {mean_price:.2f}',
                     'targetQuantity': 1
                 }
             else:
                 return {
                     'action': 'hold',
                     'confidence': 0.4,
-                    'reason': f'Price within normal range (z={z_score:.2f})',
+                    'reason': f'Price within normal range (z={z_score:.2f}) over {lookback_window}d',
                     'targetQuantity': 0
                 }
         
         except Exception as e:
-            logger.warning(f"MeanReversionStrategy.analyze() failed: {e}")
+            logger.warning(f"MeanReversionStrategy.analyse() failed: {e}")
             return {
                 'action': 'hold',
                 'confidence': 0.0,
@@ -219,28 +244,33 @@ class TechnicalStrategy(TradingStrategy):
     def __init__(self):
         super().__init__(name="Technical", version="1.0")
     
-    def analyze(self, ticker: str, mic: str, simDate: str, exchange) -> Dict[str, Any]:
+    def analyse(self, ticker: str, mic: str, simDate: str, exchange, analysisPeriod: int = 1) -> Dict[str, Any]:
         """
-        Calculate RSI and MACD indicators.
+        Calculate RSI and MACD indicators over the analysis period.
+        Scales indicator periods with analysis period for larger windows.
         """
         try:
-            # Get 60+ days of data for indicator calculation
+            # Scale indicator periods based on analysis window
+            rsi_period = max(14, analysisPeriod // 2)
+            required_data = max(50, analysisPeriod * 2)
+            
+            # Get historical data for indicator calculation
             suffixedTicker = exchange.getMicTicker(ticker, mic)
             data = exchange.getStockData(suffixedTicker, start=None, end=simDate)
             
-            if data is None or len(data) < 14:
+            if data is None or len(data) < rsi_period:
                 return {
                     'action': 'hold',
                     'confidence': 0.2,
-                    'reason': 'Insufficient data for technical analysis (< 14 days)',
+                    'reason': f'Insufficient data for technical analysis (< {rsi_period} days)',
                     'targetQuantity': 0
                 }
             
-            # Calculate RSI (14-period)
-            rsi = self._calculateRSI(data['Close'], period=14)
+            # Calculate RSI with scaled period
+            rsi = self._calculateRsi(data['Close'], period=rsi_period)
             
             # Calculate MACD
-            macd, signal = self._calculateMACD(data['Close'])
+            macd, signal = self._calculateMacd(data['Close'])
             
             # Determine action based on indicators
             confidence = 0.0
@@ -277,7 +307,7 @@ class TechnicalStrategy(TradingStrategy):
             }
         
         except Exception as e:
-            logger.warning(f"TechnicalStrategy.analyze() failed: {e}")
+            logger.warning(f"TechnicalStrategy.analyse() failed: {e}")
             return {
                 'action': 'hold',
                 'confidence': 0.0,
@@ -285,7 +315,7 @@ class TechnicalStrategy(TradingStrategy):
                 'targetQuantity': 0
             }
     
-    def _calculateRSI(self, prices, period: int = 14) -> Optional[float]:
+    def _calculateRsi(self, prices, period: int = 14) -> Optional[float]:
         """Calculate RSI indicator."""
         try:
             deltas = prices.diff()
@@ -311,7 +341,7 @@ class TechnicalStrategy(TradingStrategy):
         except:
             return None
     
-    def _calculateMACD(self, prices, fast: int = 12, slow: int = 26, signal: int = 9):
+    def _calculateMacd(self, prices, fast: int = 12, slow: int = 26, signal: int = 9):
         """Calculate MACD indicator."""
         try:
             ema_fast = prices.ewm(span=fast).mean().iloc[-1]
@@ -337,46 +367,49 @@ class FundamentalStrategy(TradingStrategy):
     def __init__(self):
         super().__init__(name="Fundamental", version="1.0")
     
-    def analyze(self, ticker: str, mic: str, simDate: str, exchange) -> Dict[str, Any]:
+    def analyse(self, ticker: str, mic: str, simDate: str, exchange, analysisPeriod: int = 1) -> Dict[str, Any]:
         """
-        Placeholder fundamental analysis.
-        Currently uses price volatility as proxy for fundamental strength.
+        Placeholder fundamental analysis scaled by analysis period.
+        Uses price volatility and momentum over the analysis window as proxy for fundamental strength.
         """
         try:
-            # Get 60 days of data
+            # Scale lookback window based on analysis period
+            lookback_window = max(30, analysisPeriod)
+            
+            # Get historical data
             suffixedTicker = exchange.getMicTicker(ticker, mic)
             data = exchange.getStockData(suffixedTicker, start=None, end=simDate)
             
-            if data is None or len(data) < 30:
+            if data is None or len(data) < lookback_window:
                 return {
                     'action': 'hold',
                     'confidence': 0.3,
-                    'reason': 'Insufficient data for fundamental analysis',
+                    'reason': f'Insufficient data for fundamental analysis (< {lookback_window} days)',
                     'targetQuantity': 0
                 }
             
-            # Calculate volatility (proxy for risk/strength)
+            # Calculate volatility (proxy for risk/strength) over the window
             returns = data['Close'].pct_change()
             volatility = returns.std()
             
-            # Calculate price momentum (30-day return)
-            price_30d_ago = data['Close'].iloc[-30]
+            # Calculate price momentum over the analysis period
+            price_ago = data['Close'].iloc[-lookback_window]
             price_today = data['Close'].iloc[-1]
-            momentum = (price_today - price_30d_ago) / price_30d_ago
+            momentum = (price_today - price_ago) / price_ago
             
             # Decision logic: if momentum is strong and volatility is moderate, go long
             if momentum > 0.05 and volatility < 0.04:
                 return {
                     'action': 'long',
                     'confidence': min(0.8, 0.4 + momentum),
-                    'reason': f'Strong momentum ({momentum*100:.1f}%) with controlled volatility',
+                    'reason': f'Strong momentum ({momentum*100:.1f}%) over {lookback_window}d with controlled volatility',
                     'targetQuantity': 1
                 }
             elif momentum < -0.05 and volatility < 0.04: 
                 return {
                     'action': 'short',
                     'confidence': min(0.8, 0.4 + abs(momentum)),
-                    'reason': f'Weak momentum ({momentum*100:.1f}%) with controlled volatility',
+                    'reason': f'Weak momentum ({momentum*100:.1f}%) over {lookback_window}d with controlled volatility',
                     'targetQuantity': 1
                 }
             else:
@@ -388,7 +421,7 @@ class FundamentalStrategy(TradingStrategy):
                 }
         
         except Exception as e:
-            logger.warning(f"FundamentalStrategy.analyze() failed: {e}")
+            logger.warning(f"FundamentalStrategy.analyse() failed: {e}")
             return {
                 'action': 'hold',
                 'confidence': 0.0,
@@ -407,7 +440,7 @@ class PerformanceTracker:
     
     def __init__(self, windowSize: int = 50):
         """
-        Initialize performance tracker.
+        Initialise performance tracker.
         
         Args:
             windowSize: Number of recent trades to consider for sliding window metrics (default: 50)
@@ -559,7 +592,7 @@ class StrategySelector:
     def __init__(self, strategies: Dict[str, TradingStrategy], epsilon: float = 0.2, 
                  minTradesRequired: int = 3):
         """
-        Initialize strategy selector.
+        Initialise strategy selector.
         
         Args:
             strategies: Dict mapping strategy names to TradingStrategy instances
@@ -651,7 +684,7 @@ class Agent:
     - Selects strategies based on past profit factors
     - Provides query interface for GUI
     - Supports lifecycle control (pause/resume/stop)
-    - Analyzes all stocks in market at each timestep
+    - analyses all stocks in market at each timestep
     '''
     
     # Market Identifier Code to ticker mapping
@@ -671,9 +704,9 @@ class Agent:
     }
 
     def __init__(self, agentId: int, accountId: int, mic: str = 'XLON', preferredStrategy: Optional[str] = None, 
-                 bannedStrategies: List[str] = None, simDate: str = None):
+                 bannedStrategies: List[str] = None, simDate: str = None, decisionPeriod: int = 1):
         '''
-        Initialize the agent.
+        Initialise the agent.
         
         Args:
             agentId: Unique agent identifier
@@ -682,6 +715,7 @@ class Agent:
             preferredStrategy: Optional strategy to preferentially select
             bannedStrategies: List of strategy names to exclude from selection
             simDate: Initial simulation date (YYYY-MM-DD format)
+            decisionPeriod: Days between trading decisions (default 1 = daily decisions)
         '''
         self.agentId = agentId
         self.accountId = accountId
@@ -689,25 +723,27 @@ class Agent:
         self.preferredStrategy = preferredStrategy
         self.bannedStrategies = bannedStrategies or []
         self.simDate = simDate
+        self.decisionPeriod = max(1, decisionPeriod)  # Ensure at least 1
         
         # Performance / strategy management
         self.performanceTracker = PerformanceTracker(windowSize=50)
-        self.strategies: Dict[str, TradingStrategy] = {}  # Will be populated by _initializeStrategies()
+        self.strategies: Dict[str, TradingStrategy] = {}  # Will be populated by _initialiseStrategies()
         self.strategySelector: Optional[StrategySelector] = None
         
         # Trade tracking
         self.totalTrades = 0
         self._executionLog: List[Dict] = []
+        self._timestepCounter = 0  # Tracks timesteps since last decision
         
         # Lifecycle control
         self._pauseFlag = False
         self._stopFlag = False
         self._lock = threading.Lock()
         
-        logger.info(f"Agent {agentId} initialized (accountId={accountId}, MIC={mic}, simDate={simDate})")
+        logger.info(f"Agent {agentId} initialised (accountId={accountId}, MIC={mic}, simDate={simDate}, decisionPeriod={self.decisionPeriod}d)")
     
-    def _initializeStrategies(self) -> None:
-        """Initialize all available strategies, respecting banned/preferred."""
+    def _initialiseStrategies(self) -> None:
+        """Initialise all available strategies, respecting banned/preferred."""
         # Instantiate all 4 trading strategies
         all_strategies = {
             'Sentiment': SentimentStrategy(),
@@ -724,7 +760,7 @@ class Agent:
         if self.preferredStrategy and self.preferredStrategy in self.strategies:
             logger.info(f"Agent {self.agentId}: Using preferred strategy {self.preferredStrategy}")
         
-        logger.info(f"Agent {self.agentId}: Initialized {len(self.strategies)} strategies: {list(self.strategies.keys())}")
+        logger.info(f"Agent {self.agentId}: Initialised {len(self.strategies)} strategies: {list(self.strategies.keys())}")
         
         self.strategySelector = StrategySelector(self.strategies)
     
@@ -762,12 +798,11 @@ class Agent:
     
     def runTimestep(self, exchange, simDate: str = None) -> None:
         '''
-        Execute one timestep of the trading loop: analyze and trade ALL stocks in the agent's market.
+        Execute one timestep of the trading loop: analyse and trade ALL stocks in the agent's market.
         
-        Called by background thread to process all tickers for the agent's MIC simultaneously.
-        1. Get all tickers for agent's MIC
-        2. For each ticker, select strategy and execute trade if recommended
-        3. Log execution
+        Called by background thread every decision period. Since date advancement is handled
+        by the GUI loop (which advances by decisionPeriod days), this method
+        should always execute a complete analysis and trade cycle.
         
         Args:
             exchange: StockExchange instance for trade execution and data access
@@ -786,9 +821,12 @@ class Agent:
                 logger.debug(f"Agent {self.agentId}: paused, skipping timestep")
                 return
         
-        # Initialize strategies if not already done
+        # Increment timestep counter for tracking purposes
+        self._timestepCounter += 1
+        
+        # Initialise strategies if not already done
         if not self.strategies:
-            self._initializeStrategies()
+            self._initialiseStrategies()
         
         # Get all tickers for this market
         tickers = self.MIC_TICKERS.get(self.mic, [])
@@ -796,19 +834,20 @@ class Agent:
             logger.warning(f"Agent {self.agentId}: No tickers found for MIC {self.mic}")
             return
         
-        print(f"[Agent {self.agentId}] Timestep {simDate} on {self.mic}: analyzing {len(tickers)} stocks")
+        print(f"[Agent {self.agentId}] Decision Day {simDate} (period={self.decisionPeriod}d) on {self.mic}: analyzing {len(tickers)} stocks")
         
-        # Analyze and trade each stock in sequence
+        # Analyse and trade each stock in sequence
         for ticker in tickers:
             try:
-                self._analyzeAndTrade(exchange, ticker, simDate)
+                self._analyseAndTrade(exchange, ticker, simDate)
             except Exception as e:
                 print(f"[Agent {self.agentId}] ERROR processing {ticker}: {e}")
                 logger.error(f"Agent {self.agentId}: failed to process {ticker}: {e}")
     
-    def _analyzeAndTrade(self, exchange, ticker: str, simDate: str) -> None:
+    def _analyseAndTrade(self, exchange, ticker: str, simDate: str) -> None:
         '''
-        Internal method: analyze a single ticker and execute trade if recommended.
+        Internal method: analyse a single ticker and execute trade if recommended.
+        Only called on decision days (every N days based on decisionPeriod).
         
         Args:
             exchange: StockExchange instance
@@ -825,19 +864,19 @@ class Agent:
             logger.error(f"Agent {self.agentId}: strategy selection failed: {e}")
             return
         
-        # Get trade recommendation from strategy
+        # Get trade recommendation from strategy with decision period as analysis window
         try:
-            recommendation = selected_strategy.analyze(ticker, self.mic, simDate, exchange)
+            recommendation = selected_strategy.analyse(ticker, self.mic, simDate, exchange, analysisPeriod=self.decisionPeriod)
             action_rec = recommendation.get('action', 'hold')
             confidence_rec = recommendation.get('confidence', 0)
+            
             print(f"[Agent {self.agentId}] {ticker}: {selected_strategy_name} -> {action_rec.upper()} ({confidence_rec*100:.0f}%)")
             logger.info(f"Agent {self.agentId}: {ticker} {selected_strategy_name} recommended {action_rec} ({confidence_rec:.1%})")
         except Exception as e:
             print(f"[Agent {self.agentId}] ERROR: Strategy analysis failed for {ticker} - {e}")
-            logger.error(f"Agent {self.agentId}: strategy.analyze({ticker}) failed: {e}")
+            logger.error(f"Agent {self.agentId}: strategy.analyse({ticker}) failed: {e}")
             return
         
-        # Execute trade if recommended (non-hold)
         action = recommendation.get('action', 'hold')
         if action == 'hold':
             logger.debug(f"Agent {self.agentId}: HOLD on {ticker}")
@@ -946,6 +985,35 @@ class Agent:
         self.simDate = simDate
         print(f"DEBUG: Agent {self.agentId} simDate updated to {self.simDate}")
     
+    def setDecisionPeriod(self, decisionPeriod: int) -> None:
+        '''
+        Update the decision period for trading (window size in days).
+        
+        Args:
+            decisionPeriod: Number of days between trading decisions (minimum 1)
+        '''
+        self.decisionPeriod = max(1, decisionPeriod)
+        print(f"DEBUG: Agent {self.agentId} decisionPeriod updated to {self.decisionPeriod} days")
+        logger.info(f"Agent {self.agentId}: decision period changed to {self.decisionPeriod} days")
+    
+    def getDecisionPeriod(self) -> int:
+        '''
+        Get the current decision period.
+        
+        Returns:
+            Current decision period in days
+        '''
+        return self.decisionPeriod
+    
+    def getTimestepCounter(self) -> int:
+        '''
+        Get the current timestep counter (progess in current decision window).
+        
+        Returns:
+            Current timestep in the decision window (0 to decisionPeriod-1)
+        '''
+        return self._timestepCounter % self.decisionPeriod if self.decisionPeriod > 0 else 0
+    
     def runIteration(self, exchange, ticker: str, simDate: str = None) -> None:
         '''
         Execute one iteration of the trading loop.
@@ -978,9 +1046,9 @@ class Agent:
                 logger.debug(f"Agent {self.agentId}: paused, skipping iteration")
                 return
         
-        # Initialize strategies if not already done
+        # Initialise strategies if not already done
         if not self.strategies:
-            self._initializeStrategies()
+            self._initialiseStrategies()
         
         # Select strategy based on performance
         try:
@@ -993,16 +1061,15 @@ class Agent:
             logger.error(f"Agent {self.agentId}: strategy selection failed: {e}")
             return
         
-        # Get trade recommendation from strategy
+        # Get trade recommendation from strategy with decision period as analysis window
         try:
-            recommendation = selected_strategy.analyze(ticker, self.mic, simDate, exchange)
+            recommendation = selected_strategy.analyse(ticker, self.mic, simDate, exchange, analysisPeriod=self.decisionPeriod)
             action_rec = recommendation.get('action', 'hold')
             confidence_rec = recommendation.get('confidence', 0)
-            print(f"[Agent {self.agentId}] {selected_strategy_name} -> {action_rec.upper()} ({confidence_rec*100:.0f}% confidence)")
             logger.info(f"Agent {self.agentId}: {selected_strategy_name} recommended {action_rec} ({confidence_rec:.1%} confidence)")
         except Exception as e:
             print(f"[Agent {self.agentId}] ERROR: Strategy analysis failed - {e}")
-            logger.error(f"Agent {self.agentId}: strategy.analyze() failed: {e}")
+            logger.error(f"Agent {self.agentId}: strategy.analyse() failed: {e}")
             return
         
         # Execute trade if recommended (non-hold)
@@ -1056,7 +1123,7 @@ class AgentManager:
     def __init__(self, exchange, tickers: List[str], mics: Dict[str, str],
                  date_range: tuple, date_step_days: int = 1):
         """
-        Initialize AgentManager.
+        Initialise AgentManager.
         
         Args:
             exchange: StockExchange instance (shared by all agents)
@@ -1085,7 +1152,7 @@ class AgentManager:
         self._paused = False
         self.mainLoopThread: Optional[threading.Thread] = None
         
-        logger.info(f"AgentManager: Initialized with {len(tickers)} tickers, "
+        logger.info(f"AgentManager: Initialised with {len(tickers)} tickers, "
                    f"date range {date_range[0]} to {date_range[1]}")
     
     def addAgent(self, agentId: int, accountId: int, mic: str, preferredStrategy: Optional[str] = None,

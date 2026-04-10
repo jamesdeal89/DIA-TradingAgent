@@ -10,9 +10,9 @@ Separates concerns:
 
 Usage:
     headlines = exchange.getNewsForStock('AAPL', 'XNAS', '2015-01-15')
-    metrics = analyze_sentiment(headlines)
+    metrics = analyseSentiment(headlines)
     
-    if metrics['avg_sentiment'] > 0.5:
+    if metrics['avgSentiment'] > 0.5:
         exchange.placeLong(...)
 """
 
@@ -20,7 +20,7 @@ from typing import List, Dict, Any
 import numpy as np
 
 
-def analyzeSentiment(headlines: List[Dict[str, Any]]) -> Dict[str, Any]:
+def analyseSentiment(headlines: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Aggregate sentiment analysis from raw headline data.
     
@@ -53,21 +53,21 @@ def analyzeSentiment(headlines: List[Dict[str, Any]]) -> Dict[str, Any]:
         ...     {'headline': 'Stock rises', 'sentiment': 'positive', 'score': 0.8, ...},
         ...     {'headline': 'Mixed signals', 'sentiment': 'neutral', 'score': 0.0, ...}
         ... ]
-        >>> metrics = analyze_sentiment(headlines)
+        >>> metrics = analyse_sentiment(headlines)
         >>> print(metrics['avg_sentiment'])  # 0.4
         >>> print(metrics['confidence'])      # 0.5
     """
     if not headlines:
         return {
-            'total_headlines': 0,
-            'positive_count': 0,
-            'neutral_count': 0,
-            'negative_count': 0,
-            'avg_sentiment': 0.0,
-            'sentiment_std': 0.0,
+            'totalHeadlines': 0,
+            'positiveCount': 0,
+            'neutralCount': 0,
+            'negativeCount': 0,
+            'avgSentiment': 0.0,
+            'sentimentStd': 0.0,
             'confidence': 0.0,
-            'positive_ratio': 0.0,
-            'negative_ratio': 0.0,
+            'positiveRatio': 0.0,
+            'negativeRatio': 0.0,
             'headlines': []
         }
     
@@ -103,20 +103,20 @@ def analyzeSentiment(headlines: List[Dict[str, Any]]) -> Dict[str, Any]:
     negative_ratio = negative_count / total if total > 0 else 0.0
     
     return {
-        'total_headlines': total,
-        'positive_count': positive_count,
-        'neutral_count': neutral_count,
-        'negative_count': negative_count,
-        'avg_sentiment': round(avg_sentiment, 4),
-        'sentiment_std': round(sentiment_std, 4),
+        'totalHeadlines': total,
+        'positiveCount': positive_count,
+        'neutralCount': neutral_count,
+        'negativeCount': negative_count,
+        'avgSentiment': round(avg_sentiment, 4),
+        'sentimentStd': round(sentiment_std, 4),
         'confidence': round(confidence, 4),
-        'positive_ratio': round(positive_ratio, 4),
-        'negative_ratio': round(negative_ratio, 4),
+        'positiveRatio': round(positive_ratio, 4),
+        'negativeRatio': round(negative_ratio, 4),
         'headlines': headlines
     }
 
 
-def filter_by_sentiment(headlines: List[Dict[str, Any]], sentiment: str) -> List[Dict[str, Any]]:
+def filterBySentiment(headlines: List[Dict[str, Any]], sentiment: str) -> List[Dict[str, Any]]:
     """
     Filter headlines by specific sentiment.
     
@@ -129,30 +129,30 @@ def filter_by_sentiment(headlines: List[Dict[str, Any]], sentiment: str) -> List
     
     Example:
         >>> headlines = [...]
-        >>> positive_only = filter_by_sentiment(headlines, 'positive')
+        >>> positiveOnly = filterBySentiment(headlines, 'positive')
     """
     return [h for h in headlines if h['sentiment'] == sentiment]
 
 
-def filter_by_confidence(headlines: List[Dict[str, Any]], min_score: float) -> List[Dict[str, Any]]:
+def filterByConfidence(headlines: List[Dict[str, Any]], minScore: float) -> List[Dict[str, Any]]:
     """
     Filter headlines by minimum confidence score.
     
     Args:
         headlines: List of headline dicts from getNewsForStock()
-        min_score: Minimum sentiment score [-1.0, +1.0]
+        minScore: Minimum sentiment score [-1.0, +1.0]
     
     Returns:
-        Filtered list of headlines with |score| >= min_score
+        Filtered list of headlines with |score| >= minScore
     
     Example:
         >>> headlines = [...]
-        >>> high_confidence = filter_by_confidence(headlines, 0.7)
+        >>> highConfidence = filterByConfidence(headlines, 0.7)
     """
-    return [h for h in headlines if abs(h['score']) >= min_score]
+    return [h for h in headlines if abs(h['score']) >= minScore]
 
 
-def summarize_sentiment(headlines: List[Dict[str, Any]]) -> str:
+def summariseSentiment(headlines: List[Dict[str, Any]]) -> str:
     """
     Generate human-readable sentiment summary.
     
@@ -164,18 +164,18 @@ def summarize_sentiment(headlines: List[Dict[str, Any]]) -> str:
     
     Example:
         >>> headlines = [...]
-        >>> print(summarize_sentiment(headlines))
+        >>> print(summariseSentiment(headlines))
         Positive (5 positive, 2 neutral, 1 negative; avg: 0.45)
     """
-    metrics = analyze_sentiment(headlines)
+    metrics = analyseSentiment(headlines)
     
-    if metrics['total_headlines'] == 0:
+    if metrics['totalHeadlines'] == 0:
         return "No headlines"
     
-    pos = metrics['positive_count']
-    neu = metrics['neutral_count']
-    neg = metrics['negative_count']
-    avg = metrics['avg_sentiment']
+    pos = metrics['positiveCount']
+    neu = metrics['neutralCount']
+    neg = metrics['negativeCount']
+    avg = metrics['avgSentiment']
     
     # Determine sentiment category
     if avg > 0.5:
@@ -192,97 +192,97 @@ def summarize_sentiment(headlines: List[Dict[str, Any]]) -> str:
     return f"{category} ({pos} positive, {neu} neutral, {neg} negative; avg: {avg:.2f})"
 
 
-def get_bullish_threshold(sentiment_metrics: Dict[str, Any], strict: bool = False) -> bool:
+def getBullishThreshold(sentimentMetrics: Dict[str, Any], strict: bool = False) -> bool:
     """
     Determine if sentiment is bullish (positive signal).
     
     Args:
-        sentiment_metrics: Dict returned by analyze_sentiment()
+        sentimentMetrics: Dict returned by analyseSentiment()
         strict: If True, use stricter threshold (avg > 0.5); if False, use avg > 0.3
     
     Returns:
         Boolean indicating bullish sentiment
     
     Example:
-        >>> metrics = analyze_sentiment(headlines)
-        >>> if get_bullish_threshold(metrics):
+        >>> metrics = analyseSentiment(headlines)
+        >>> if getBullishThreshold(metrics):
         ...     exchange.placeLong(...)
     """
     threshold = 0.5 if strict else 0.3
-    return sentiment_metrics['avg_sentiment'] > threshold
+    return sentimentMetrics['avgSentiment'] > threshold
 
 
-def get_bearish_threshold(sentiment_metrics: Dict[str, Any], strict: bool = False) -> bool:
+def getBearishThreshold(sentimentMetrics: Dict[str, Any], strict: bool = False) -> bool:
     """
     Determine if sentiment is bearish (negative signal).
     
     Args:
-        sentiment_metrics: Dict returned by analyze_sentiment()
+        sentimentMetrics: Dict returned by analyseSentiment()
         strict: If True, use stricter threshold (avg < -0.5); if False, use avg < -0.3
     
     Returns:
         Boolean indicating bearish sentiment
     
     Example:
-        >>> metrics = analyze_sentiment(headlines)
-        >>> if get_bearish_threshold(metrics):
+        >>> metrics = analyseSentiment(headlines)
+        >>> if getBearishThreshold(metrics):
         ...     exchange.placeShort(...)
     """
     threshold = -0.5 if strict else -0.3
-    return sentiment_metrics['avg_sentiment'] < threshold
+    return sentimentMetrics['avgSentiment'] < threshold
 
 
 # Convenience wrapper for common agent use cases
-class SentimentAnalyzer:
+class SentimentAnalyser:
     """
     Convenience wrapper for sentiment analysis in agents.
     
     Usage:
-        analyzer = SentimentAnalyzer()
+        analyser = SentimentAnalyser()
         
         headlines = exchange.getNewsForStock('AAPL', 'XNAS', simDate)
-        metrics = analyzer.analyze(headlines)
+        metrics = analyser.analyse(headlines)
         
-        if analyzer.is_bullish(metrics):
+        if analyser.is_bullish(metrics):
             exchange.placeLong(...)
     """
     
-    def __init__(self, bullish_threshold: float = 0.3, bearish_threshold: float = -0.3):
+    def __init__(self, bullishThreshold: float = 0.3, bearishThreshold: float = -0.3):
         """
-        Initialize analyzer with custom thresholds.
+        Initialise analyser with custom thresholds.
         
         Args:
-            bullish_threshold: Score above which sentiment is bullish (default: 0.3)
-            bearish_threshold: Score below which sentiment is bearish (default: -0.3)
+            bullishThreshold: Score above which sentiment is bullish (default: 0.3)
+            bearishThreshold: Score below which sentiment is bearish (default: -0.3)
         """
-        self.bullish_threshold = bullish_threshold
-        self.bearish_threshold = bearish_threshold
+        self.bullishThreshold = bullishThreshold
+        self.bearishThreshold = bearishThreshold
     
-    def analyze(self, headlines: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Analyze sentiment of headlines."""
-        return analyze_sentiment(headlines)
+    def analyse(self, headlines: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Analyse sentiment of headlines."""
+        return analyseSentiment(headlines)
     
-    def is_bullish(self, metrics: Dict[str, Any]) -> bool:
+    def isBullish(self, metrics: Dict[str, Any]) -> bool:
         """Check if metrics indicate bullish sentiment."""
-        return metrics['avg_sentiment'] > self.bullish_threshold
+        return metrics['avgSentiment'] > self.bullishThreshold
     
-    def is_bearish(self, metrics: Dict[str, Any]) -> bool:
+    def isBearish(self, metrics: Dict[str, Any]) -> bool:
         """Check if metrics indicate bearish sentiment."""
-        return metrics['avg_sentiment'] < self.bearish_threshold
+        return metrics['avgSentiment'] < self.bearishThreshold
     
-    def is_neutral(self, metrics: Dict[str, Any]) -> bool:
+    def isNeutral(self, metrics: Dict[str, Any]) -> bool:
         """Check if metrics indicate neutral sentiment."""
-        return self.bearish_threshold <= metrics['avg_sentiment'] <= self.bullish_threshold
+        return self.bearishThreshold <= metrics['avgSentiment'] <= self.bullishThreshold
     
-    def get_signal(self, metrics: Dict[str, Any]) -> str:
+    def getSignal(self, metrics: Dict[str, Any]) -> str:
         """Get signal: 'long', 'short', or 'hold'."""
-        if self.is_bullish(metrics):
+        if self.isBullish(metrics):
             return 'long'
-        elif self.is_bearish(metrics):
+        elif self.isBearish(metrics):
             return 'short'
         else:
             return 'hold'
     
-    def summarize(self, headlines: List[Dict[str, Any]]) -> str:
+    def summarise(self, headlines: List[Dict[str, Any]]) -> str:
         """Get human-readable summary."""
-        return summarize_sentiment(headlines)
+        return summariseSentiment(headlines)

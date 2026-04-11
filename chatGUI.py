@@ -433,6 +433,19 @@ def chatGUI():
                             st.markdown(response)
                         st.session_state[messagesKey].append({"role": "ai", "content": response})
                     
+                    elif intentLabel == "recommendation":
+                        # Display recommendation quality metrics - were holds accurate?
+                        recommendationMetrics = {}
+                        for strategyName in agent.strategies.keys():
+                            recommendationMetrics[strategyName] = agent.performanceTracker.getRecommendationMetrics(strategyName)
+                        
+                        response = ResponseFormatter.formatRecommendationQuality(recommendationMetrics)
+                        
+                        # Display in chat
+                        with st.chat_message("assistant"):
+                            st.markdown(response)
+                        st.session_state[messagesKey].append({"role": "ai", "content": response})
+                    
                     else:
                         # Fallback response for unmatched intents
                         with st.chat_message("assistant"):

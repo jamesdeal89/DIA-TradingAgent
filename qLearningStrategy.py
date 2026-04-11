@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 class DQNNetwork(nn.Module):
     """Neural network mapping state to Q-values."""
     
-    def __init__(self, state_size: int, action_size: int = 3, hidden_size: int = 128):
+    def __init__(self, state_size: int, action_size: int = 4, hidden_size: int = 128):
         """Initialize network with given state and action sizes."""
         super(DQNNetwork, self).__init__()
         self.state_size = state_size
@@ -294,7 +294,8 @@ class DeepQLearningStrategy(TradingStrategy):
     ACTION_LONG = 0
     ACTION_SHORT = 1
     ACTION_HOLD = 2
-    ACTION_MAP = {0: 'long', 1: 'short', 2: 'hold'}
+    ACTION_SELL = 3
+    ACTION_MAP = {0: 'long', 1: 'short', 2: 'hold', 3: 'sell'}
     
     def __init__(self, learning_rate: float = 0.001, gamma: float = 0.99, 
                  epsilon: float = 0.1, model_path: Optional[str] = None):
@@ -307,7 +308,7 @@ class DeepQLearningStrategy(TradingStrategy):
         
         # Initialise Q-network
         self.state_size = StateBuilder.STATE_SIZE
-        self.action_size = 3  # LONG, SHORT, HOLD
+        self.action_size = 4  # LONG, SHORT, HOLD, SELL
         self.network = DQNNetwork(self.state_size, self.action_size)
         self.optimizer = optim.Adam(self.network.parameters(), lr=learning_rate)
         self.loss_fn = nn.MSELoss()

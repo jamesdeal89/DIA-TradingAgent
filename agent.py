@@ -18,6 +18,7 @@ from typing import Dict, List, Any, Optional
 import threading
 import time
 import logging
+import numpy as np
 from datetime import datetime, timedelta
 from tradingStrategy import TradingStrategy
 from qLearningStrategy import DeepQLearningStrategy
@@ -562,7 +563,7 @@ class PerformanceTracker:
                 del self._metricsCache[strategyName]
     
     def recordRecommendation(self, strategyName: str, action: str, ticker: str, 
-                            price: float, confidence: float, simDate: str) -> None:
+                            price: float, confidence: float, simDate: str, mic: str = None) -> None:
         """
         Record a strategy recommendation (LONG, SHORT, or HOLD).
         
@@ -573,6 +574,7 @@ class PerformanceTracker:
             price: Price at time of recommendation
             confidence: Strategy confidence in recommendation (0.0-1.0)
             simDate: Simulation date (YYYY-MM-DD)
+            mic: Market identifier code (XNAS, XLON, XHKG, XJPX)
         """
         with self._lock:
             if strategyName not in self._recommendationHistory:
@@ -584,36 +586,62 @@ class PerformanceTracker:
                 'price': price,
                 'confidence': confidence,
                 'date': simDate,
+                'mic': mic,
                 'outcome': 'PENDING'
             }
             self._recommendationHistory[strategyName].append(recommendation)
             logger.debug(f"[{strategyName}] Recommendation recorded: {action} {ticker} @ {price:.2f}")
     
-    def scoreRecommendations(self, exchange, thresholdPct: float = 2.0) -> None:
+    def scoreRecommendations(self, exchange, simDate: str, mic: str, thresholdPct: float = 2.0) -> None:
         """
         Retroactively score HOLD recommendations based on actual price movement.
         
         Args:
             exchange: StockExchange instance to get current prices
+            simDate: Current simulation date (YYYY-MM-DD) for fetching prices
+            mic: Market identifier code for recommendations
             thresholdPct: Percentage threshold for outcome classification (default 2%)
         """
         with self._lock:
-            from datetime import datetime, timedelta
-            
-            for strategyName, trades in self._recommendationHistory.items():
-                for rec in trades:
+            for strategyName, recommendations in self._recommendationHistory.items():
+                for rec in recommendations:
                     if rec['outcome'] != 'PENDING':
                         continue  # Already scored
                     
-                    # Only score HOLD recommendations; LONG/SHORT are scored when executed
+                    # Only score HOLD recommendations; LONG/SHORT handled separately
                     if rec['action'] != 'hold':
                         continue
                     
                     try:
-                        # Get current price for the ticker (would need to be called with current date context)
-                        # This is a simplified version; in practice you'd pass current price
-                        # For now, mark as pending until we integrate with exchange
-                        pass
+                        ticker = rec['ticker']
+                        priceAtRec = rec['price']
+                        recMic = rec.get('mic', mic)  # Use stored MIC if available, else use provided
+                        
+                        # Get current price using the known MIC
+                        try:
+                            suffixedTicker = exchange.getMicTicker(ticker, recMic)
+                            data = exchange.getStockData(suffixedTicker, start=None, end=simDate)
+                            if data is None or len(data) == 0:
+                                continue
+                            
+                            currentPrice = float(data['Close'].iloc[-1])
+                            
+                            # Calculate percentage change
+                            pctChange = ((currentPrice - priceAtRec) / priceAtRec) * 100
+                            
+                            # Score based on threshold
+                            if pctChange > thresholdPct:
+                                rec['outcome'] = 'MISSED_LONG'
+                            elif pctChange < -thresholdPct:
+                                rec['outcome'] = 'MISSED_SHORT'
+                            else:
+                                rec['outcome'] = 'CORRECT'
+                            
+                            logger.debug(f"[{strategyName}] Scored HOLD {ticker}: {pctChange:+.2f}% -> {rec['outcome']}")
+                        
+                        except Exception as priceErr:
+                            logger.debug(f"Could not fetch price for {ticker}: {priceErr}")
+                    
                     except Exception as e:
                         logger.warning(f"Could not score recommendation for {rec['ticker']}: {e}")
     
@@ -786,7 +814,7 @@ class Agent:
     # Market Identifier Code to ticker mapping
     MIC_TICKERS = {
         'XNAS': ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'AMZN'],
-        'XLON': ['BP', 'SHEL', 'AZN', 'VOD', 'LLOY'],
+        'XLON': ['BP', 'SHEL', 'AZN', 'VOD', 'HSBA'],
         'XHKG': ['0700', '0388', '1113', '0005', '0011'],
         'XJPX': ['7203', '6758', '9984', '6861', '8053']
     }
@@ -822,6 +850,12 @@ class Agent:
         self.totalTrades = 0
         self._executionLog: List[Dict] = []
         self._timestepCounter = 0  # Tracks timesteps since last decision
+        
+        # DeepQL learning: cache entry states for trades so we can compute rewards on close
+        # Maps (ticker): (state, action, entryPrice, entryDate) for open DeepQL trades
+        self._deepql_state_cache: Dict[str, Dict[str, Any]] = {}
+        # Track when we last trained to avoid overtraining
+        self._last_training_timestep = 0  
         
         # Lifecycle control
         self._pauseFlag = False
@@ -944,6 +978,12 @@ class Agent:
         
         # Log portfolio snapshot at decision point
         exchange.logPortfolioSnapshot(self.accountId, self.agentId, simDate)
+        
+        # Score all HOLD recommendations against actual price movement
+        self.performanceTracker.scoreRecommendations(exchange, simDate, self.mic, thresholdPct=2.0)
+        
+        # Process DeepQL learning: check for closed trades, compute rewards, and train
+        self._processDeepQLearning(exchange, simDate)
     
     def _analyseAndTrade(self, exchange, ticker: str, simDate: str, 
                          selected_strategy_name: str, selected_strategy: TradingStrategy) -> None:
@@ -974,8 +1014,22 @@ class Agent:
                 if current_price is not None and len(current_price) > 0:
                     price_at_rec = float(current_price['Close'].iloc[-1])
                     self.performanceTracker.recordRecommendation(
-                        selected_strategy_name, action_rec, ticker, price_at_rec, confidence_rec, simDate
+                        selected_strategy_name, action_rec, ticker, price_at_rec, confidence_rec, simDate, self.mic
                     )
+                    
+                    # For DeepQL, cache the state for ALL actions (long, short, hold, sell) for learning
+                    if selected_strategy_name == 'DeepQL':
+                        state = recommendation.get('state', None)
+                        if state is not None:
+                            # Map action string to action index: 0=long, 1=short, 2=hold, 3=sell
+                            action_idx = 0 if action_rec == 'long' else (1 if action_rec == 'short' else (3 if action_rec == 'sell' else 2))
+                            self._deepql_state_cache[ticker] = {
+                                'state': state,
+                                'action': action_idx,
+                                'entryPrice': price_at_rec,
+                                'entryDate': simDate,
+                                'action_str': action_rec
+                            }
             except Exception as rec_err:
                 logger.debug(f"Could not record recommendation for {ticker}: {rec_err}")
         except Exception as e:
@@ -1071,6 +1125,206 @@ class Agent:
             print(f"[Agent {self.agentId}] TRADE ERROR: {action} {ticker} failed - {e}")
             logger.error(f"Agent {self.agentId}: {action} {ticker} execution failed: {e}")
             raise
+    
+    # DEEP Q-LEARNING: EXPERIENCE RECORDING & TRAINING
+    
+    def _processDeepQLearning(self, exchange, simDate: str) -> None:
+        """
+        Process Deep Q-Learning training: check for closed trades and scored HOLD recommendations.
+        Converts outcomes to rewards and records experiences for network learning.
+        Called at end of each timestep to enable learning from actual trading outcomes.
+        
+        For LONG/SHORT: reward = (exit_price - entry_price) / entry_price
+        For HOLD: reward = +0.01 if CORRECT, -0.02 if MISSED_LONG or MISSED_SHORT
+        
+        Args:
+            exchange: StockExchange instance for price lookups
+            simDate: Current simulation date (YYYY-MM-DD)
+        """
+        try:
+            # Get the DeepQL strategy instance
+            deepql_strategy = self.strategies.get('DeepQL', None)
+            if not deepql_strategy:
+                # DeepQL not enabled, skip learning
+                return  
+            
+            # Check portfolio for closed DeepQL trades (LONG/SHORT)
+            portfolio = exchange.checkPortfolio(self.accountId, simDate)
+            processed_tickers = set()
+            
+            # ========== PHASE 1: PROCESS EXECUTED TRADES (LONG/SHORT) ==========
+            if portfolio is not None and not portfolio.empty:
+                # Iterate through closed positions
+                for idx, row in portfolio.iterrows():
+                    if row.get('closed') is False:
+                        continue  # Position still open
+                    
+                    ticker = row.get('ticker')
+                    strategy_name = row.get('strategyName', '')
+                    
+                    # Only process DeepQL trades
+                    if strategy_name != 'DeepQL' or ticker in processed_tickers:
+                        continue
+                    
+                    processed_tickers.add(ticker)
+                    
+                    # If we have cached state from when this trade opened
+                    if ticker not in self._deepql_state_cache:
+                        # No cached state, skip
+                        continue  
+                    
+                    cache_entry = self._deepql_state_cache[ticker]
+                    entry_state = cache_entry['state']
+                    entry_action = cache_entry['action']
+                    entry_price = cache_entry['entryPrice']
+                    entry_date = cache_entry['entryDate']
+                    action_str = cache_entry.get('action_str', '')
+                    
+                    try:
+                        # Get current price to compute reward
+                        try:
+                            current_price = exchange._getSafePrice(ticker, self.mic, simDate)
+                        except ValueError:
+                            # Stock delisted or no data, skip
+                            del self._deepql_state_cache[ticker]
+                            continue
+                        
+                        # Calculate reward based on price change and trade type
+                        trade_type = row.get('tradeType', '')
+                        if trade_type == 'long':
+                            # For long: profit if price went up
+                            reward = (current_price - entry_price) / entry_price
+                        elif trade_type == 'short':
+                            # For short: profit if price went down
+                            reward = (entry_price - current_price) / entry_price
+                        else:
+                            continue  # Unknown trade type
+                        
+                        # Build current state (next state from learning perspective)
+                        from qLearningStrategy import StateBuilder
+                        next_state = StateBuilder.buildState(ticker, self.mic, simDate, exchange, analysisPeriod=self.decisionPeriod)
+                        
+                        # Record experience: (state, action, reward, next_state, done=True)
+                        import numpy as np
+                        entry_state_array = np.array(entry_state) if not isinstance(entry_state, np.ndarray) else entry_state
+                        next_state_array = np.array(next_state) if not isinstance(next_state, np.ndarray) else next_state
+                        
+                        deepql_strategy.recordExperience(
+                            state=entry_state_array,
+                            action=entry_action,
+                            reward=reward,
+                            next_state=next_state_array,
+                            done=True
+                        )
+                        
+                        logger.info(f"Agent {self.agentId}: Recorded DeepQL {action_str.upper()} for {ticker}: reward={reward:.4f}")
+                        
+                        # Clear cache for this ticker (no longer needed)
+                        del self._deepql_state_cache[ticker]
+                    
+                    except Exception as exp_err:
+                        logger.error(f"Agent {self.agentId}: Error recording trade experience for {ticker}: {exp_err}")
+                        if ticker in self._deepql_state_cache:
+                            del self._deepql_state_cache[ticker]
+            
+            # ========== PHASE 2: PROCESS SCORED HOLD & SELL RECOMMENDATIONS ==========
+            # Query recommendations table for DeepQL HOLD and SELL actions with scored outcomes
+            try:
+                cursor = exchange.connection.cursor()
+                query = """
+                    SELECT ticker, action, priceAtRecommendation, timestampRecommended, outcome
+                    FROM strategy_recommendations
+                    WHERE accountId = %s AND strategyName = 'DeepQL' 
+                    AND action IN ('hold', 'sell') AND outcome IN ('CORRECT', 'MISSED_LONG', 'MISSED_SHORT')
+                    AND DATE(timestampRecommended) <= %s
+                    ORDER BY timestampRecommended DESC
+                    LIMIT 100
+                """
+                cursor.execute(query, (self.accountId, simDate))
+                scored_recommendations = cursor.fetchall()
+                cursor.close()
+                
+                for rec in scored_recommendations:
+                    ticker = rec[0]
+                    action = rec[1]
+                    price_at_rec = rec[2]
+                    timestamp_rec = rec[3]
+                    outcome = rec[4]
+                    
+                    # Skip if we already processed this in trades phase
+                    if ticker in processed_tickers:
+                        continue
+                    
+                    # Only process if we have cached state for this action
+                    if ticker not in self._deepql_state_cache:
+                        continue
+                    
+                    cache_entry = self._deepql_state_cache[ticker]
+                    entry_state = cache_entry['state']
+                    entry_action = cache_entry['action']
+                    action_str = cache_entry.get('action_str', '')
+                    
+                    # Only process if cached action matches this recommendation action
+                    # 2 = HOLD, 3 = SELL
+                    expected_action_idx = 2 if action == 'hold' else (3 if action == 'sell' else -1)
+                    if entry_action != expected_action_idx:
+                        continue
+                    
+                    try:
+                        # Convert outcome to reward (same logic for HOLD and SELL)
+                        if outcome == 'CORRECT':
+                            # HOLD/SELL was right - price stayed flat or fell (good exit)
+                            reward = 0.01
+                        elif outcome == 'MISSED_LONG':
+                            # HOLD/SELL was wrong - missed an up move
+                            reward = -0.02
+                        elif outcome == 'MISSED_SHORT':
+                            # HOLD/SELL was wrong - missed a down move (less common)
+                            reward = -0.02
+                        else:
+                            # Unknown outcome, skip
+                            continue
+                        
+                        # Build current state at simDate
+                        from qLearningStrategy import StateBuilder
+                        next_state = StateBuilder.buildState(ticker, self.mic, simDate, exchange, analysisPeriod=self.decisionPeriod)
+                        
+                        # Record experience
+                        import numpy as np
+                        entry_state_array = np.array(entry_state) if not isinstance(entry_state, np.ndarray) else entry_state
+                        next_state_array = np.array(next_state) if not isinstance(next_state, np.ndarray) else next_state
+                        
+                        deepql_strategy.recordExperience(
+                            state=entry_state_array,
+                            action=entry_action,  # 2 = HOLD or 3 = SELL
+                            reward=reward,
+                            next_state=next_state_array,
+                            done=True
+                        )
+                        
+                        logger.info(f"Agent {self.agentId}: Recorded DeepQL {action.upper()} for {ticker}: outcome={outcome}, reward={reward:.4f}")
+                        processed_tickers.add(ticker)
+                    
+                    except Exception as rec_err:
+                        logger.error(f"Agent {self.agentId}: Error processing {action.upper()} for {ticker}: {rec_err}")
+            
+            except Exception as hold_query_err:
+                logger.debug(f"Agent {self.agentId}: Could not query HOLD recommendations: {hold_query_err}")
+            
+            # ========== PHASE 3: TRAIN NETWORK ==========
+            # Train network on accumulated experiences
+            # Only train if we've had some recent experiences and enough timesteps have passed
+            if len(deepql_strategy.experience_buffer) > 0 and (self._timestepCounter - self._last_training_timestep) >= 5:
+                try:
+                    batch_size = min(32, len(deepql_strategy.experience_buffer))
+                    loss = deepql_strategy.train(batch_size=batch_size)
+                    self._last_training_timestep = self._timestepCounter
+                    logger.info(f"Agent {self.agentId}: DeepQL training complete. Loss={loss:.6f}, Buffer size={len(deepql_strategy.experience_buffer)}")
+                except Exception as train_err:
+                    logger.error(f"Agent {self.agentId}: DeepQL training failed: {train_err}")
+        
+        except Exception as e:
+            logger.error(f"Agent {self.agentId}: Error in _processDeepQLearning: {e}")
     
     # QUERY INTERFACE FOR GUI
     

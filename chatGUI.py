@@ -28,6 +28,61 @@ def getRunningAgents():
 def initialiseStockExchange():
     return StockExchange()
 
+def logSimulationFinalResults(accountId: int, agent, exchange, agentData=None):
+    """
+    Log final simulation results to console using responseFormatter summaries.
+    """
+    try:
+        print(f"\n{'='*80}")
+        print(f"SIMULATION FINAL RESULTS - Agent {accountId}")
+        print(f"{'='*80}")
+        start_date = agentData.get('simDate') if agentData else 'Unknown'
+        print(f"Simulation Date Range: {start_date} -> {agent.simDate}")
+        print(f"Decision Period: {agent.getDecisionPeriod()} days")
+        print(f"Total Timesteps: {agent._timestepCounter}")
+        print(f"Total Trades: {agent.totalTrades}")
+        print()
+        
+        # Portfolio summary
+        try:
+            portfolio = exchange.getPortfolioValue(agent.accountId)
+            balance = exchange.getBalance(agent.accountId)
+            print("PORTFOLIO SUMMARY:")
+            print(ResponseFormatter.formatPortfolioSummary(portfolio, balance))
+            print()
+        except Exception as e:
+            print(f"Note: Could not retrieve portfolio summary: {e}")
+            print()
+        
+        # Strategy comparison
+        try:
+            print("STRATEGY PERFORMANCE:")
+            print(ResponseFormatter.formatStrategyComparison(agent.performanceTracker, agent._executionLog))
+            print()
+        except Exception as e:
+            print(f"Note: Could not format strategy comparison: {e}")
+            print()
+        
+        # Recent closed trades
+        try:
+            print("RECENT CLOSED TRADES (Last 5):")
+            closed_trades = exchange.getClosedTrades(agent.accountId, limit=5)
+            if closed_trades:
+                print(ResponseFormatter.formatClosedTrades(closed_trades, limit=5))
+            else:
+                print("No closed trades recorded.")
+            print()
+        except Exception as e:
+            print(f"Note: Could not retrieve closed trades: {e}")
+            print()
+        
+        print(f"{'='*80}")
+        print(f"Simulation complete. Results saved to database.")
+        print(f"{'='*80}\n")
+        
+    except Exception as e:
+        print(f"Error logging final results: {e}")
+
 def runAgentTradeLoop(accountId, agentData, exchange):
     """
     Background trading loop: at each timestep, agent analyses all stocks in its market.
@@ -61,9 +116,18 @@ def runAgentTradeLoop(accountId, agentData, exchange):
                     agent.setSimDate(currentRealDate)
                     simDate = currentRealDate
             else:
-                # Check if we've reached the max news date or today
+                # Check if we've reached the configured end date (if set), max news date, or today
                 hasReachedLimit = False
-                if maxNewsDate and simDate >= maxNewsDate:
+                endDate = agent.getEndDate()
+                currentDate = datetime.strptime(simDate, '%Y-%m-%d')
+                
+                if endDate:
+                    # If end date is explicitly set, use it for historical experiments
+                    endDateTime = datetime.strptime(endDate, '%Y-%m-%d')
+                    if currentDate > endDateTime:
+                        print(f"DEBUG: Simulation reached configured end date ({endDate}). Stopping agent.")
+                        hasReachedLimit = True
+                elif maxNewsDate and simDate >= maxNewsDate:
                     print(f"DEBUG: Simulation reached max news date ({maxNewsDate}). Stopping agent.")
                     hasReachedLimit = True
                 elif simDate >= todayDate:
@@ -74,6 +138,8 @@ def runAgentTradeLoop(accountId, agentData, exchange):
                     agentData['threadActive'] = False
                     agentData['threadRunning'] = False
                     print(f"DEBUG: Agent {accountId} simulation ended.")
+                    # Log final results to console/stdout
+                    logSimulationFinalResults(accountId, agent, exchange, agentData)
                     break
             
             print(f"DEBUG: Agent {accountId} timestep {timestep_count} on {simDate}")
@@ -99,7 +165,7 @@ def runAgentTradeLoop(accountId, agentData, exchange):
     
     print(f"DEBUG: Trade loop ended for agent {accountId}")
 
-def startAgent(mic, prefStrategy, bannedList, simDate=None, decisionPeriod=1, isRealtimeMode=False):
+def startAgent(mic, prefStrategy, bannedList, simDate=None, endDate=None, decisionPeriod=1, isRealtimeMode=False):
     exchange = initialiseStockExchange()
     
     try:
@@ -123,6 +189,7 @@ def startAgent(mic, prefStrategy, bannedList, simDate=None, decisionPeriod=1, is
             preferredStrategy=preferred,
             bannedStrategies=bannedList,
             simDate=simDate,
+            endDate=endDate,
             decisionPeriod=decisionPeriod
         )
         
@@ -135,6 +202,7 @@ def startAgent(mic, prefStrategy, bannedList, simDate=None, decisionPeriod=1, is
             'prefStrategy': preferred,
             'banned': bannedList,
             'simDate': simDate,
+            'endDate': endDate,
             'decisionPeriod': decisionPeriod,
             'isRealtimeMode': isRealtimeMode,
             'threadRunning': True,
@@ -196,16 +264,22 @@ def chatGUI():
             if isRealtimeMode:
                 st.info("Realtime mode: Agent uses today's date and trades on current stock data. Start date is not applicable.")
                 simDate = datetime.now()
+                endDate = None
             else:
                 with st.container(border=True):
-                    st.caption("Historical Simulation Settings")
-                    simDate = st.date_input("Simulation start date", value=datetime(2011, 1, 1), min_value=datetime(1990, 1, 1), max_value=datetime.now())
+                    st.caption("Historical Simulation Settings (for Repeatability)")
+                    col_start, col_end = st.columns(2)
+                    with col_start:
+                        simDate = st.date_input("Start date", value=datetime(2011, 1, 1), min_value=datetime(1990, 1, 1), max_value=datetime.now(), key="sim_start")
+                    with col_end:
+                        endDate = st.date_input("End date (optional)", value=datetime(2011, 12, 31), min_value=datetime(1990, 1, 1), max_value=datetime.now(), key="sim_end")
             
             decisionPeriod = st.slider("Decision period (days)", min_value=1, max_value=60, value=1, step=1, help="Make trading decisions every N days instead of daily. Helps reduce noise by analyzing larger time windows.")
             
             if st.form_submit_button("Start Agent"):
                 simDateStr = simDate.strftime('%Y-%m-%d') if not isinstance(simDate, str) else simDate
-                accountId = startAgent(mic, prefStrategy, banned, simDateStr, decisionPeriod, isRealtimeMode)
+                endDateStr = endDate.strftime('%Y-%m-%d') if endDate and not isinstance(endDate, str) else (endDate if endDate else None)
+                accountId = startAgent(mic, prefStrategy, banned, simDateStr, endDateStr, decisionPeriod, isRealtimeMode)
                 if accountId:
                     mode_display = "realtime" if isRealtimeMode else "historical"
                     st.success(f"Agent created with account ID: {accountId} (mode: {mode_display}, decision period: {decisionPeriod}d)")

@@ -820,7 +820,7 @@ class Agent:
     }
 
     def __init__(self, agentId: int, accountId: int, mic: str = 'XLON', preferredStrategy: Optional[str] = None, 
-                 bannedStrategies: List[str] = None, simDate: str = None, decisionPeriod: int = 1):
+                 bannedStrategies: List[str] = None, simDate: str = None, endDate: str = None, decisionPeriod: int = 1):
         '''
         Initialise the agent.
         
@@ -831,6 +831,7 @@ class Agent:
             preferredStrategy: Optional strategy to preferentially select
             bannedStrategies: List of strategy names to exclude from selection
             simDate: Initial simulation date (YYYY-MM-DD format)
+            endDate: End date for simulation (YYYY-MM-DD format). If None, simulation runs until max news date
             decisionPeriod: Days between trading decisions (default 1 = daily decisions)
         '''
         self.agentId = agentId
@@ -839,6 +840,7 @@ class Agent:
         self.preferredStrategy = preferredStrategy
         self.bannedStrategies = bannedStrategies or []
         self.simDate = simDate
+        self.endDate = endDate
         self.decisionPeriod = max(1, decisionPeriod)  # Ensure at least 1
         
         # Performance / strategy management
@@ -865,7 +867,7 @@ class Agent:
         # Initialise strategies
         self._initialiseStrategies()
         
-        logger.info(f"Agent {agentId} initialised (accountId={accountId}, MIC={mic}, simDate={simDate}, decisionPeriod={self.decisionPeriod}d)")
+        logger.info(f"Agent {agentId} initialised (accountId={accountId}, MIC={mic}, simDate={simDate}, endDate={endDate}, decisionPeriod={self.decisionPeriod}d)")
     
     def _initialiseStrategies(self) -> None:
         """Initialise all available strategies, respecting banned/preferred."""
@@ -1380,6 +1382,25 @@ class Agent:
         '''
         self.simDate = simDate
         print(f"DEBUG: Agent {self.agentId} simDate updated to {self.simDate}")
+    
+    def setEndDate(self, endDate: str) -> None:
+        '''
+        Set the end date for the simulation (for repeatable historical backtests).
+        
+        Args:
+            endDate: End date (YYYY-MM-DD). Simulation will stop when currentDate > endDate
+        '''
+        self.endDate = endDate
+        print(f"DEBUG: Agent {self.agentId} endDate updated to {self.endDate}")
+    
+    def getEndDate(self) -> Optional[str]:
+        '''
+        Get the simulation end date.
+        
+        Returns:
+            End date (YYYY-MM-DD) or None if not set
+        '''
+        return self.endDate
     
     def setDecisionPeriod(self, decisionPeriod: int) -> None:
         '''

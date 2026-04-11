@@ -91,6 +91,22 @@ class StockExchange:
                  "agentId INT, "
                  "UNIQUE KEY (accountId, snapshotDate))")
         self.__executeDatabaseQuery(query)
+
+        query = ("CREATE TABLE IF NOT EXISTS strategy_recommendations ("
+                 "id INT AUTO_INCREMENT PRIMARY KEY, "
+                 "accountId INT, "
+                 "ticker VARCHAR(255), "
+                 "mic ENUM('XNAS','XLON','XHKG','XJPX'), "
+                 "strategyName VARCHAR(255), "
+                 "action ENUM('long','short','hold'), "
+                 "priceAtRecommendation FLOAT, "
+                 "confidence FLOAT, "
+                 "timestampRecommended DATETIME, "
+                 "priceAtScoring FLOAT, "
+                 "timestampScored DATETIME, "
+                 "outcome ENUM('CORRECT','MISSED_LONG','MISSED_SHORT','SOLD','PENDING'), "
+                 "INDEX idx_strategy_date (strategyName, timestampRecommended))")
+        self.__executeDatabaseQuery(query)
         
     def __createServerConnection(self):
         '''

@@ -76,15 +76,15 @@ class SentimentStrategy(TradingStrategy):
             # Calculate average sentiment score across all collected headlines
             avg_score = sum(all_scores) / len(all_scores) if all_scores else 0.0
             
-            # Determine action based on sentiment (lower threshold 0.1 for more frequent trades)
-            if avg_score > 0.1:
+            # Determine action based on sentiment (threshold 0.05 for reasonable signal detection)
+            if avg_score > 0.05:
                 return {
                     'action': 'long',
                     'confidence': min(0.95, abs(avg_score)),
                     'reason': f'Positive sentiment ({avg_score:.2f}) from {headline_count} headlines over {analysisPeriod} days',
                     'targetQuantity': 1
                 }
-            elif avg_score < -0.1:
+            elif avg_score < -0.05:
                 # Recommend selling longs if sentiment is negative (agent checks portfolio)
                 return {
                     'action': 'sell',
@@ -428,10 +428,12 @@ class PerformanceTracker:
         self.windowSize = windowSize
         
         # Per-strategy tracking
-        # strategyName -> list of trades
+        # strategyName -> list of trades (executed trades only)
         self._tradeHistory: Dict[str, List[Dict]] = {}  
-        # strategyName -> cached metrics
-        self._metricsCache: Dict[str, Dict] = {}  
+        # strategyName -> cached metrics for trades
+        self._metricsCache: Dict[str, Dict] = {}
+        # strategyName -> list of all recommendations (including HOLDs)
+        self._recommendationHistory: Dict[str, List[Dict]] = {}  
     
     def recordTrade(self, strategyName: str, entryPrice: float, exitPrice: float, 
                    quantity: int, ticker: str, entryDate: str, exitDate: str) -> None:
@@ -558,6 +560,118 @@ class PerformanceTracker:
                 del self._tradeHistory[strategyName]
             if strategyName in self._metricsCache:
                 del self._metricsCache[strategyName]
+    
+    def recordRecommendation(self, strategyName: str, action: str, ticker: str, 
+                            price: float, confidence: float, simDate: str) -> None:
+        """
+        Record a strategy recommendation (LONG, SHORT, or HOLD).
+        
+        Args:
+            strategyName: Name of strategy making recommendation
+            action: 'long', 'short', or 'hold'
+            ticker: Stock ticker
+            price: Price at time of recommendation
+            confidence: Strategy confidence in recommendation (0.0-1.0)
+            simDate: Simulation date (YYYY-MM-DD)
+        """
+        with self._lock:
+            if strategyName not in self._recommendationHistory:
+                self._recommendationHistory[strategyName] = []
+            
+            recommendation = {
+                'action': action,
+                'ticker': ticker,
+                'price': price,
+                'confidence': confidence,
+                'date': simDate,
+                'outcome': 'PENDING'
+            }
+            self._recommendationHistory[strategyName].append(recommendation)
+            logger.debug(f"[{strategyName}] Recommendation recorded: {action} {ticker} @ {price:.2f}")
+    
+    def scoreRecommendations(self, exchange, thresholdPct: float = 2.0) -> None:
+        """
+        Retroactively score HOLD recommendations based on actual price movement.
+        
+        Args:
+            exchange: StockExchange instance to get current prices
+            thresholdPct: Percentage threshold for outcome classification (default 2%)
+        """
+        with self._lock:
+            from datetime import datetime, timedelta
+            
+            for strategyName, trades in self._recommendationHistory.items():
+                for rec in trades:
+                    if rec['outcome'] != 'PENDING':
+                        continue  # Already scored
+                    
+                    # Only score HOLD recommendations; LONG/SHORT are scored when executed
+                    if rec['action'] != 'hold':
+                        continue
+                    
+                    try:
+                        # Get current price for the ticker (would need to be called with current date context)
+                        # This is a simplified version; in practice you'd pass current price
+                        # For now, mark as pending until we integrate with exchange
+                        pass
+                    except Exception as e:
+                        logger.warning(f"Could not score recommendation for {rec['ticker']}: {e}")
+    
+    def getRecommendationMetrics(self, strategyName: str) -> Dict[str, Any]:
+        """
+        Get recommendation quality metrics for a strategy.
+        
+        Returns:
+            {
+                'totalRecommendations': int,
+                'holdCount': int,
+                'holdCorrect': int,
+                'holdMissedLong': int,
+                'holdMissedShort': int,
+                'holdAccuracy': float (0.0-1.0),
+                'longCount': int,
+                'shortCount': int,
+                'totalExecuted': int
+            }
+        """
+        with self._lock:
+            if strategyName not in self._recommendationHistory:
+                return {
+                    'totalRecommendations': 0,
+                    'holdCount': 0,
+                    'holdCorrect': 0,
+                    'holdMissedLong': 0,
+                    'holdMissedShort': 0,
+                    'holdAccuracy': 0.0,
+                    'longCount': 0,
+                    'shortCount': 0,
+                    'totalExecuted': 0
+                }
+            
+            recs = self._recommendationHistory[strategyName]
+            
+            holds = [r for r in recs if r['action'] == 'hold']
+            hold_correct = len([r for r in holds if r['outcome'] == 'CORRECT'])
+            hold_missed_long = len([r for r in holds if r['outcome'] == 'MISSED_LONG'])
+            hold_missed_short = len([r for r in holds if r['outcome'] in ('MISSED_SHORT', 'SOLD')])
+            
+            longs = [r for r in recs if r['action'] == 'long']
+            shorts = [r for r in recs if r['action'] == 'short']
+            
+            hold_accuracy = hold_correct / len(holds) if holds else 0.0
+            
+            return {
+                'totalRecommendations': len(recs),
+                'holdCount': len(holds),
+                'holdCorrect': hold_correct,
+                'holdMissedLong': hold_missed_long,
+                'holdMissedShort': hold_missed_short,
+                'holdAccuracy': hold_accuracy,
+                'longCount': len(longs),
+                'shortCount': len(shorts),
+                'totalExecuted': len(longs) + len(shorts),
+                'pendingCount': len([r for r in recs if r['outcome'] == 'PENDING'])
+            }
 
 
 # EPSILON-GREEDY STRATEGY SELECTOR
@@ -853,6 +967,17 @@ class Agent:
             
             print(f"[Agent {self.agentId}] {ticker}: {selected_strategy_name} -> {action_rec.upper()} ({confidence_rec*100:.0f}%)")
             logger.info(f"Agent {self.agentId}: {ticker} {selected_strategy_name} recommended {action_rec} ({confidence_rec:.1%})")
+            
+            # Record ALL recommendations (including HOLD) for later quality assessment
+            try:
+                current_price = exchange.getStockData(exchange.getMicTicker(ticker, self.mic), start=None, end=simDate)
+                if current_price is not None and len(current_price) > 0:
+                    price_at_rec = float(current_price['Close'].iloc[-1])
+                    self.performanceTracker.recordRecommendation(
+                        selected_strategy_name, action_rec, ticker, price_at_rec, confidence_rec, simDate
+                    )
+            except Exception as rec_err:
+                logger.debug(f"Could not record recommendation for {ticker}: {rec_err}")
         except Exception as e:
             print(f"[Agent {self.agentId}] ERROR: Strategy analysis failed for {ticker} - {e}")
             logger.error(f"Agent {self.agentId}: strategy.analyse({ticker}) failed: {e}")

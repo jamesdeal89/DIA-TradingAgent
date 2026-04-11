@@ -369,6 +369,61 @@ class ResponseFormatter:
         return "\n".join(lines)
     
     @staticmethod
+    def formatRecommendationQuality(recommendationMetrics: Dict[str, Dict[str, Any]]) -> str:
+        """
+        Format strategy recommendation quality metrics.
+        Shows all recommendations (including HOLD) and their outcomes.
+        
+        Args:
+            recommendationMetrics: Dict mapping strategy names -> 
+                {totalRecommendations, holdCount, holdCorrect, holdMissedLong, holdMissedShort, 
+                 holdAccuracy, longCount, shortCount, totalExecuted, pendingCount}
+        
+        Returns:
+            Formatted recommendation quality report
+        """
+        if not recommendationMetrics:
+            return "No recommendation data available yet."
+        
+        lines = ["Strategy Recommendation Quality Report"]
+        lines.append("=" * 70)
+        
+        for strategy, metrics in recommendationMetrics.items():
+            total_recs = metrics.get('totalRecommendations', 0)
+            if total_recs == 0:
+                continue
+            
+            hold_count = metrics.get('holdCount', 0)
+            hold_correct = metrics.get('holdCorrect', 0)
+            hold_missed_long = metrics.get('holdMissedLong', 0)
+            hold_missed_short = metrics.get('holdMissedShort', 0)
+            hold_accuracy = metrics.get('holdAccuracy', 0.0)
+            long_count = metrics.get('longCount', 0)
+            short_count = metrics.get('shortCount', 0)
+            total_executed = metrics.get('totalExecuted', 0)
+            pending = metrics.get('pendingCount', 0)
+            
+            lines.append(f"\n{strategy}:")
+            lines.append(f"  Total Recommendations: {total_recs}")
+            
+            if hold_count > 0:
+                lines.append(f"  HOLD Recommendations: {hold_count} ({hold_count/total_recs*100:.1f}%)")
+                lines.append(f"    ✓ Correct HOLD: {hold_correct} ({hold_accuracy*100:.1f}%)")
+                lines.append(f"    ✗ Missed LONG (price went up): {hold_missed_long}")
+                lines.append(f"    ✗ Missed SHORT (price went down): {hold_missed_short}")
+                if pending > 0:
+                    lines.append(f"    ⏳ Pending Scoring: {pending}")
+            
+            if long_count > 0 or short_count > 0:
+                lines.append(f"  Action Recommendations: {total_executed} ({total_executed/total_recs*100:.1f}%)")
+                if long_count > 0:
+                    lines.append(f"    • LONG: {long_count}")
+                if short_count > 0:
+                    lines.append(f"    • SHORT: {short_count}")
+        
+        return "\n".join(lines)
+    
+    @staticmethod
     def formatSimulationControl(speedMultiplier: float, startDate: str, 
                                endDate: str, currentDate: str) -> str:
         """

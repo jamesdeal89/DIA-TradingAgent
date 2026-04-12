@@ -14,7 +14,6 @@ from typing import Dict, List, Any, Optional
 from collections import deque
 import random
 import logging
-import yfinance
 from datetime import datetime, timedelta
 from tradingStrategy import TradingStrategy
 
@@ -278,10 +277,10 @@ class LSTMStrategy(TradingStrategy):
         for _ in range(epochs):
             batch = random.sample(self.replayBuffer, min(batchSize, len(self.replayBuffer)))
             
-            states = torch.stack([torch.FloatTensor(b['state']).unsqueeze(0) for b in batch]).squeeze(1)
+            states = torch.stack([torch.FloatTensor(b['state']) for b in batch])
             actions = torch.LongTensor([b['action'] for b in batch])
             rewards = torch.FloatTensor([b['reward'] for b in batch])
-            nextStates = torch.stack([torch.FloatTensor(b['nextState']).unsqueeze(0) for b in batch]).squeeze(1)
+            nextStates = torch.stack([torch.FloatTensor(b['nextState']) for b in batch])
             dones = torch.FloatTensor([b['done'] for b in batch])
             
             qPred = self.network(states).gather(1, actions.unsqueeze(1)).squeeze(1)

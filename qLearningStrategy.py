@@ -30,7 +30,7 @@ class DQNNetwork(nn.Module):
     """Neural network mapping state to Q-values."""
     
     def __init__(self, state_size: int, action_size: int = 4, hidden_size: int = 128):
-        """Initialize network with given state and action sizes."""
+        """Initialise network with given state and action sizes."""
         super(DQNNetwork, self).__init__()
         self.state_size = state_size
         self.action_size = action_size
@@ -299,7 +299,7 @@ class DeepQLearningStrategy(TradingStrategy):
     
     def __init__(self, learning_rate: float = 0.001, gamma: float = 0.99, 
                  epsilon: float = 0.1, model_path: Optional[str] = None):
-        """Initialize Deep Q-Learning strategy."""
+        """Initialise Deep Q-Learning strategy."""
         super().__init__(name="DeepQLearning", version="1.0")
         
         self.learning_rate = learning_rate

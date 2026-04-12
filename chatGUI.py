@@ -31,10 +31,17 @@ def getRunningAgents():
 def initialiseStockExchange():
     return StockExchange()
 
-def logSimulationFinalResults(accountId: int, agent, exchange, agentData=None):
+def logSimulationFinalResults(accountId: int, agent, exchange, agentData=None, closureDate: str = None):
     """
     Log final simulation results to console using responseFormatter summaries.
     First closes all open positions to get true final P&L.
+    
+    Args:
+        accountId: Account ID
+        agent: Agent instance
+        exchange: StockExchange instance
+        agentData: Optional agent metadata
+        closureDate: Optional specific date to use for position closure (defaults to agent.simDate)
     """
     try:
         # Check for open positions BEFORE closing
@@ -58,8 +65,9 @@ def logSimulationFinalResults(accountId: int, agent, exchange, agentData=None):
         cursor.close()
         
         # Close all open positions to get true final P&L
-        print(f"\nClosing all open positions at {agent.simDate}...")
-        positions_closed = exchange.closeAllOpenPositions(agent.accountId, agent.simDate, agent.agentId)
+        closureDate = closureDate or agent.simDate
+        print(f"\nClosing all open positions at {closureDate}...")
+        positions_closed = exchange.closeAllOpenPositions(agent.accountId, closureDate, agent.agentId)
         print(f"Closed {positions_closed} open position(s)")
         
         # Train LSTM strategy at episode end
@@ -206,6 +214,7 @@ def runAgentTradeLoop(accountId, agentData, exchange):
             else:
                 # Check if we've reached the configured end date (if set), max news date, or today
                 hasReachedLimit = False
+                lastValidSimDate = simDate
                 endDate = agent.getEndDate()
                 currentDate = datetime.strptime(simDate, '%Y-%m-%d')
                 
@@ -225,9 +234,9 @@ def runAgentTradeLoop(accountId, agentData, exchange):
                 if hasReachedLimit:
                     agentData['threadActive'] = False
                     agentData['threadRunning'] = False
-                    print(f"DEBUG: Agent {accountId} simulation ended.")
-                    # Log final results to console/stdout
-                    logSimulationFinalResults(accountId, agent, exchange, agentData)
+                    print(f"DEBUG: Agent {accountId} simulation ended at {simDate}.")
+                    # Log final results using the last simulation date
+                    logSimulationFinalResults(accountId, agent, exchange, agentData, lastValidSimDate)
                     break
             
             print(f"DEBUG: Agent {accountId} timestep {timestep_count} on {simDate}")
@@ -238,7 +247,18 @@ def runAgentTradeLoop(accountId, agentData, exchange):
                 # Advance by decision period
                 decisionPeriod = agent.getDecisionPeriod()
                 nextDate = (datetime.strptime(simDate, '%Y-%m-%d') + timedelta(days=decisionPeriod)).strftime('%Y-%m-%d')
-                agent.setSimDate(nextDate)
+                
+                # Only advance if next date won't exceed end date
+                shouldAdvance = True
+                endDate = agent.getEndDate()
+                if endDate:
+                    endDateTime = datetime.strptime(endDate, '%Y-%m-%d')
+                    nextDateTime = datetime.strptime(nextDate, '%Y-%m-%d')
+                    if nextDateTime > endDateTime:
+                        shouldAdvance = False
+                
+                if shouldAdvance:
+                    agent.setSimDate(nextDate)
             
             timestep_count += 1
         except Exception as e:

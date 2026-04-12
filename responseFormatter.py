@@ -328,7 +328,7 @@ class ResponseFormatter:
             
             all_strategies = set(strategy_trade_counts.keys())
             
-            # Initialize metrics for all strategies with proper trade counts
+            # Initialise metrics for all strategies with proper trade counts
             metrics = {strategy: {
                 'totalTrades': strategy_trade_counts.get(strategy, 0),
                 'winCount': 0,

@@ -4,7 +4,7 @@ import mysql.connector
 from mysql.connector import Error
 import pandas as pd
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -250,7 +250,7 @@ class StockExchange:
         '''
         Short (with automated borrowing) - sell a stock not owned via borrowing the stock. 
         Automatically borrows the stock at current price, then immediately sells it.
-        Once 14 days pass, the current price is used to purchase a new stock and repay the broker. 
+        Once 30 days pass, the current price is used to purchase a new stock and repay the broker. 
         Idea is that if the price falls, the shorter profits. 
 
         simDate allows the agent to act on historical data. 
@@ -263,6 +263,7 @@ class StockExchange:
             strategyName: REQUIRED - name of strategy initiating this trade (for performance tracking)
             agentId: Optional agent ID for tracking
         '''
+        print(f"[TRADE LOG] placeShort INITIATED: {ticker} x{quantity} @ {simDate} strategy={strategyName}")
         # Validate strategyName is provided
         if not strategyName:
             print(f"ERROR: strategyName is required to place a short")
@@ -299,6 +300,7 @@ class StockExchange:
             strategyName: REQUIRED - name of strategy initiating this trade (for performance tracking)
             agentId: Optional agent ID for tracking
         '''
+        print(f"[TRADE LOG] placeLong INITIATED: {ticker} x{quantity} @ {simDate} strategy={strategyName}")
         # Validate strategyName is provided
         if not strategyName:
             print(f"ERROR: strategyName is required to place a long")
@@ -321,7 +323,7 @@ class StockExchange:
             self.__executeDatabaseQuery(query, (accountId, ticker, mic, quantity, price, simDate, strategyName, agentId))
             # If ticker for accountId already in portfolios: update the quantity rather than add a new record.
             # Insert new record otherwise.
-            query = "INSERT INTO portfolios (accountId, ticker, mic, tradeType, quantity, entryPrice, strategyName, agentId, entryDate) VALUES (%s,%s,%s,'long',%s,%s,%s,%s,%s) " \
+            query = "INSERT INTO portfolios (accountId, ticker, mic, tradeType, quantity, entryPrice, strategyName, agentId, entryDate, closed) VALUES (%s,%s,%s,'long',%s,%s,%s,%s,%s,FALSE) " \
             "ON DUPLICATE KEY UPDATE quantity = quantity + VALUES(quantity);"
             self.__executeDatabaseQuery(query, (accountId, ticker, mic, quantity, price, strategyName, agentId, simDate))
         else:
@@ -354,7 +356,7 @@ class StockExchange:
         Gracefully handles exceptions - returns None if failed for any reason.
         '''
         self.checkAndAutoCloseShorts(accountId, simDate)
-        query = "SELECT * FROM portfolios WHERE accountId = %s AND closed IS FALSE"
+        query = "SELECT * FROM portfolios WHERE accountId = %s AND (closed = FALSE OR closed IS NULL)"
         cursor = self.connection.cursor()
         try:
             cursor.execute(query, (accountId,))
@@ -419,16 +421,20 @@ class StockExchange:
             
             print(f"Sold {quantity} of {ticker} at {price}. Proceeds: {proceeds}")
             
-            # Record P&L for performance tracking if strategy info is available
-            if self.performanceTracker and strategyName and entryPrice is not None and entryDate:
+            # Record P&L for performance tracking (use fallback values if missing)
+            safe_strategy = strategyName if strategyName else "Unknown"
+            safe_entryPrice = entryPrice if entryPrice is not None else price
+            safe_entryDate = entryDate if entryDate else simDate
+            
+            if self.performanceTracker:
                 self.recordTradePnL(
                     accountId,
-                    strategyName,
-                    entryPrice=entryPrice,
+                    safe_strategy,
+                    entryPrice=safe_entryPrice,
                     exitPrice=price,
                     quantity=quantity,
                     ticker=ticker,
-                    entryDate=entryDate,
+                    entryDate=safe_entryDate,
                     exitDate=simDate,
                     tradeType='long'
                 )
@@ -439,7 +445,7 @@ class StockExchange:
             return -1
 
 
-    def closeShort(self, accountId, ticker, mic, quantity, simDate):
+    def closeShort(self, accountId, ticker, mic, quantity, simDate, strategyName=None, priceAtShort=None, entryDate=None):
         '''
         Settle a short early.
         Must purchase the stock at the current price to return it to the broker.
@@ -457,27 +463,31 @@ class StockExchange:
         quantity = float(quantity)
         cost_to_buyback = float(price * quantity)
         
-        # Fetch open short position data for P&L recording
-        query = "SELECT priceAtShort, strategyName, entryDate FROM portfolios " \
-                "WHERE accountId = %s AND ticker = %s AND tradeType = 'short' AND closed IS FALSE"
-        cursor = self.connection.cursor()
-        try:
-            cursor.execute(query, (accountId, ticker))
-            position = cursor.fetchone()
-        except:
-            position = None
-        finally:
-            cursor.close()
-        
-        priceAtShort = position[0] if position else None
-        strategyName = position[1] if position else None
-        entryDate = position[2] if position else None
+        # Fetch open short position data for P&L recording (if not provided)
+        if strategyName is None or priceAtShort is None or entryDate is None:
+            query = "SELECT priceAtShort, strategyName, entryDate FROM portfolios " \
+                    "WHERE accountId = %s AND ticker = %s AND tradeType = 'short' AND (closed = FALSE OR closed IS NULL)"
+            cursor = self.connection.cursor()
+            try:
+                cursor.execute(query, (accountId, ticker))
+                position = cursor.fetchone()
+            except:
+                position = None
+            finally:
+                cursor.close()
+            
+            if priceAtShort is None and position:
+                priceAtShort = position[0]
+            if strategyName is None and position:
+                strategyName = position[1]
+            if entryDate is None and position:
+                entryDate = position[2]
         
         # Atomically: Check if open (closed IS FALSE), deduct quantity, and set closed=TRUE
         # This prevents race conditions where the same short is closed twice
         query = "UPDATE portfolios SET quantity = quantity - %s, closed = TRUE " \
                 "WHERE accountId = %s AND ticker = %s AND tradeType = 'short' " \
-                "AND quantity >= %s AND closed IS FALSE"
+                "AND quantity >= %s AND (closed = FALSE OR closed IS NULL)"
         rowsAffected = self.__executeDatabaseQuery(query, (quantity, accountId, ticker, quantity))
         
         if rowsAffected > 0:
@@ -492,13 +502,17 @@ class StockExchange:
             
             print(f"Short for {ticker} closed at {price}. Cost to buy back: {cost_to_buyback}")
             
-            # Record P&L to performance tracker if position data available
-            if self.performanceTracker and strategyName and priceAtShort is not None and entryDate:
-                entryDateStr = entryDate if isinstance(entryDate, str) else entryDate.strftime('%Y-%m-%d')
+            # Record P&L to performance tracker (use fallback values if missing)
+            safe_strategy = strategyName if strategyName else "Unknown"
+            safe_priceAtShort = priceAtShort if priceAtShort is not None else price
+            safe_entryDate = entryDate if entryDate else simDate
+            
+            if self.performanceTracker:
+                entryDateStr = safe_entryDate if isinstance(safe_entryDate, str) else safe_entryDate.strftime('%Y-%m-%d')
                 self.recordTradePnL(
                     accountId,
-                    strategyName,
-                    entryPrice=priceAtShort,
+                    safe_strategy,
+                    entryPrice=safe_priceAtShort,
                     exitPrice=price,
                     quantity=quantity,
                     ticker=ticker,
@@ -509,6 +523,7 @@ class StockExchange:
             
             return 0
         else:
+            print(f"[TRADE LOG] closeShort FAILED: No open short for {ticker}")
             print(f"ERROR: No open short found for {ticker} with sufficient quantity or already closed.")
             return -1
     
@@ -580,14 +595,20 @@ class StockExchange:
             for row in cursor.fetchall():
                 strategy, agentId, tradeType, ticker, entryPrice, priceAtShort, quantity, exitPrice = row
                 
+                # Convert all Decimal values to float to avoid type errors
+                entryPrice = float(entryPrice) if entryPrice else 0.0
+                priceAtShort = float(priceAtShort) if priceAtShort else 0.0
+                quantity = float(quantity) if quantity else 0.0
+                exitPrice = float(exitPrice) if exitPrice else 0.0
+                
                 if tradeType == 'long':
-                    entry = entryPrice or 0
-                    exit_val = exitPrice or 0
+                    entry = entryPrice
+                    exit_val = exitPrice
                     pnl = (exit_val - entry) * abs(quantity)
                     pnl_pct = ((exit_val - entry) / entry * 100) if entry > 0 else 0
                 elif tradeType == 'short':
-                    entry = priceAtShort or 0
-                    exit_val = exitPrice or 0
+                    entry = priceAtShort
+                    exit_val = exitPrice
                     pnl = (entry - exit_val) * abs(quantity)
                     pnl_pct = ((entry - exit_val) / entry * 100) if entry > 0 else 0
                 else:
@@ -613,8 +634,8 @@ class StockExchange:
 
     def checkAndAutoCloseShorts(self, accountId: int, currentDate: str) -> int:
         '''
-        Auto-close any short positions that have been open for 14+ days.
-        As per the domain model: shorts are held for max 14 days, then auto-repurchased.
+        Auto-close any short positions that have been open for 30+ days.
+        As per the domain model: shorts are held for max 30 days, then auto-repurchased.
         
         Args:
             accountId: Account to process
@@ -625,13 +646,13 @@ class StockExchange:
         '''
         try:
             current_date_obj = datetime.strptime(currentDate, '%Y-%m-%d')
-            cutoff_date = current_date_obj - timedelta(days=14)
+            cutoff_date = current_date_obj - timedelta(days=30)
             cutoff_date_str = cutoff_date.strftime('%Y-%m-%d')
         except ValueError:
             print(f"ERROR: Invalid date format {currentDate}. Expected YYYY-MM-DD.")
             return 0
         
-        # Find all open shorts older than 14 days
+        # Find all open shorts older than 30 days
         query = """
             SELECT ticker, mic, quantity, priceAtShort, strategyName, agentId, entryDate
             FROM portfolios
@@ -646,33 +667,38 @@ class StockExchange:
             aged_shorts = cursor.fetchall()
             
             for ticker, mic, quantity, priceAtShort, strategyName, agentId, entryDate in aged_shorts:
-                # Get current price to calculate exit price
+                # Calculate actual expiry date: entryDate + 30 days
                 try:
-                    current_price = self._getSafePrice(ticker, mic, currentDate)
+                    if isinstance(entryDate, datetime):
+                        entryDateObj = entryDate
+                    elif isinstance(entryDate, date):
+                        # Convert date object to datetime
+                        entryDateObj = datetime.combine(entryDate, datetime.min.time())
+                    else:
+                        # Assume it's a string
+                        entryDateObj = datetime.strptime(str(entryDate), '%Y-%m-%d')
+                    
+                    expiryDate = entryDateObj + timedelta(days=30)
+                    expiryDateStr = expiryDate.strftime('%Y-%m-%d')
+                except (ValueError, AttributeError) as dateErr:
+                    print(f"ERROR: Could not calculate expiry date for {ticker}: {dateErr}")
+                    continue
+                
+                # Get price at expiry date (not current date)
+                try:
+                    exitPrice = self._getSafePrice(ticker, mic, expiryDateStr)
                 except ValueError as e:
                     print(f"WARNING: {str(e)} - Skipping auto-close for {ticker}")
                     continue
                 
-                # Auto-close by calling closeShort
-                result = self.closeShort(accountId, ticker, mic, quantity, currentDate)
+                # Auto-close by calling closeShort at the actual expiry date
+                # NOTE: closeShort() already calls recordTradePnL() internally, so we don't duplicate it here
+                result = self.closeShort(accountId, ticker, mic, quantity, expiryDateStr, 
+                                        strategyName=strategyName, priceAtShort=priceAtShort, 
+                                        entryDate=entryDate)
                 if result == 0:
                     closed_count += 1
-                    print(f"Auto-closed aged short: {ticker} ({quantity} shares)")
-                    
-                    # Calculate and record P&L for performance tracking
-                    if self.performanceTracker and strategyName:
-                        entryDateStr = entryDate if isinstance(entryDate, str) else entryDate.strftime('%Y-%m-%d')
-                        self.recordTradePnL(
-                            accountId,
-                            strategyName,
-                            entryPrice=priceAtShort,
-                            exitPrice=current_price,
-                            quantity=quantity,
-                            ticker=ticker,
-                            entryDate=entryDateStr,
-                            exitDate=currentDate,
-                            tradeType='short'
-                        )
+                    print(f"Auto-closed aged short: {ticker} ({quantity} shares) at expiry date {expiryDateStr}")
         except Error as e:
             print(f"ERROR in checkAndAutoCloseShorts: {e}")
         finally:
@@ -701,17 +727,21 @@ class StockExchange:
             query_longs = """
                 SELECT ticker, mic, quantity, strategyName, entryPrice, entryDate
                 FROM portfolios
-                WHERE accountId = %s AND tradeType = 'long' AND closed IS FALSE
+                WHERE accountId = %s AND tradeType = 'long' AND (closed = FALSE OR closed IS NULL)
             """
             cursor.execute(query_longs, (accountId,))
             open_longs = cursor.fetchall()
             
             for ticker, mic, quantity, strategyName, entryPrice, entryDate in open_longs:
                 try:
+                    # Convert Decimal types from database to float to avoid type errors
+                    quantity_float = float(quantity)
+                    entryPrice_float = float(entryPrice)
+                    
                     current_price = self._getSafePrice(ticker, mic, currentDate)
-                    self.sellLong(accountId, ticker, mic, quantity, currentDate, strategyName, entryPrice, entryDate)
+                    self.sellLong(accountId, ticker, mic, quantity_float, currentDate, strategyName, entryPrice_float, entryDate)
                     closed_count += 1
-                    print(f"Closed open long: {ticker} {quantity} shares @ ${current_price:.2f}")
+                    print(f"Closed open long: {ticker} {quantity_float} shares @ ${current_price:.2f}")
                 except Exception as e:
                     print(f"Warning: Could not close long {ticker}: {e}")
             
@@ -719,17 +749,21 @@ class StockExchange:
             query_shorts = """
                 SELECT ticker, mic, quantity, strategyName, priceAtShort, entryDate
                 FROM portfolios
-                WHERE accountId = %s AND tradeType = 'short' AND closed IS FALSE
+                WHERE accountId = %s AND tradeType = 'short' AND (closed = FALSE OR closed IS NULL)
             """
             cursor.execute(query_shorts, (accountId,))
             open_shorts = cursor.fetchall()
             
             for ticker, mic, quantity, strategyName, priceAtShort, entryDate in open_shorts:
                 try:
+                    # Convert Decimal types from database to float to avoid type errors
+                    quantity_float = float(quantity)
+                    priceAtShort_float = float(priceAtShort)
+                    
                     current_price = self._getSafePrice(ticker, mic, currentDate)
-                    self.closeShort(accountId, ticker, mic, quantity, currentDate)
+                    self.closeShort(accountId, ticker, mic, quantity_float, currentDate, strategyName=strategyName, priceAtShort=priceAtShort_float, entryDate=entryDate)
                     closed_count += 1
-                    print(f"Closed open short: {ticker} {quantity} shares @ ${current_price:.2f}")
+                    print(f"Closed open short: {ticker} {quantity_float} shares @ ${current_price:.2f}")
                 except Exception as e:
                     print(f"Warning: Could not close short {ticker}: {e}")
         
@@ -764,7 +798,7 @@ class StockExchange:
             exitDate: Exit date (YYYY-MM-DD)
             tradeType: 'long' or 'short' to determine P&L formula
         '''
-        if not self.performanceTracker or not strategyName:
+        if not self.performanceTracker:
             return
         
         try:

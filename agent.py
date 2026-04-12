@@ -461,6 +461,19 @@ class PerformanceTracker:
                 pnl = (entryPrice - exitPrice) * quantity
             else:  # default to long
                 pnl = (exitPrice - entryPrice) * quantity
+            
+            # Deduplication: check if this EXACT trade was just recorded (same entry date, exit date, prices)
+            # Include entryDate to distinguish trades on same ticker with similar prices
+            trade_sig_tuple = (ticker, quantity, round(entryPrice, 4), round(exitPrice, 4), round(pnl, 4), entryDate)
+            recent_trades = self._tradeHistory[strategyName][-3:] if len(self._tradeHistory[strategyName]) > 0 else []
+            for recent_trade in recent_trades:
+                recent_sig = (recent_trade['ticker'], recent_trade['quantity'],
+                             round(recent_trade['entryPrice'], 4), round(recent_trade['exitPrice'], 4),
+                             round(recent_trade['pnl'], 4), recent_trade['entryDate'])
+                if trade_sig_tuple == recent_sig:
+                    logger.warning(f"[{strategyName}] DUPLICATE TRADE REJECTED: {ticker} {quantity}@{entryPrice:.2f}->{exitPrice:.2f} on {entryDate} P&L=${pnl:.2f}")
+                    return
+            
             trade = {
                 'ticker': ticker,
                 'entryPrice': entryPrice,
@@ -477,7 +490,12 @@ class PerformanceTracker:
             if strategyName in self._metricsCache:
                 del self._metricsCache[strategyName]
             
-            logger.info(f"[{strategyName}] Trade recorded: {ticker} {quantity}@{entryPrice}->{exitPrice}, P&L=${pnl:.2f}")
+            # Log with detailed breakdown
+            allTradesCount = len(self._tradeHistory[strategyName])
+            allTradesPnL = sum(t['pnl'] for t in self._tradeHistory[strategyName])
+            # Create a unique signature for debugging duplicates
+            trade_sig = f"{ticker}_{quantity}_{entryPrice:.2f}_{exitPrice:.2f}_{pnl:.2f}"
+            logger.info(f"[{strategyName}] Trade #{allTradesCount} [{trade_sig}] recorded: {ticker} {quantity}@{entryPrice:.2f}->{exitPrice:.2f}, P&L=${pnl:.2f} | Total P&L all-time: ${allTradesPnL:.2f}")
     
     def getProfitFactor(self, strategyName: str) -> float:
         """
@@ -514,7 +532,7 @@ class PerformanceTracker:
                 'avgWin': float,
                 'avgLoss': float,
                 'avgPnl': float,
-                'totalPnl': float
+                'totalPnL': float
             }
         """
         with self._lock:
@@ -527,10 +545,17 @@ class PerformanceTracker:
                     'avgWin': 0.0,
                     'avgLoss': 0.0,
                     'avgPnl': 0.0,
-                    'totalPnl': 0.0
+                    'totalPnL': 0.0
                 }
             
-            recentTrades = self._tradeHistory[strategyName][-self.windowSize:]
+            # Get ALL trades for this strategy (not just window)
+            allTrades = self._tradeHistory[strategyName]
+            allTradesPnL = sum(t['pnl'] for t in allTrades)
+            allWins = [t for t in allTrades if t['pnl'] > 0]
+            allLosses = [t for t in allTrades if t['pnl'] < 0]
+            
+            # Get windowed trades for metrics calculation
+            recentTrades = allTrades[-self.windowSize:]
             
             wins = [t for t in recentTrades if t['pnl'] > 0]
             losses = [t for t in recentTrades if t['pnl'] < 0]
@@ -546,8 +571,17 @@ class PerformanceTracker:
                 'avgWin': totalProfit / len(wins) if wins else 0.0,
                 'avgLoss': abs(totalLoss / len(losses)) if losses else 0.0,
                 'avgPnl': sum(t['pnl'] for t in recentTrades) / len(recentTrades),
-                'totalPnl': sum(t['pnl'] for t in recentTrades)
+                'totalPnL': sum(t['pnl'] for t in recentTrades)
             }
+            
+            # Log detail if metrics show zero P&L but all-time P&L is non-zero
+            if metrics['totalPnL'] < 0.01 and allTradesPnL > 1.0:
+                logger.warning(f"[{strategyName}] METRICS MISMATCH: windowPnL=${metrics['totalPnL']:.2f} vs allTimePnL=${allTradesPnL:.2f} ({len(allTrades)} total trades, window={self.windowSize})")
+                logger.warning(f"  Window trades: {len(recentTrades)}, Wins={len(wins)} (${totalProfit:.2f}), Losses={len(losses)} (${abs(totalLoss):.2f})")
+                logger.warning(f"  All-time: Wins={len(allWins)} (${sum(t['pnl'] for t in allWins):.2f}), Losses={len(allLosses)} (${abs(sum(t['pnl'] for t in allLosses)):.2f})")
+                # Detail each trade
+                for i, trade in enumerate(allTrades):
+                    logger.warning(f"    Trade {i+1}: {trade['ticker']} {trade['quantity']}@${trade['entryPrice']:.2f}->${trade['exitPrice']:.2f} = ${trade['pnl']:.2f}")
             
             self._metricsCache[strategyName] = metrics
             return metrics
@@ -706,6 +740,28 @@ class PerformanceTracker:
                 'totalExecuted': len(longs) + len(shorts),
                 'pendingCount': len([r for r in recs if r['outcome'] == 'PENDING'])
             }
+    
+    def getAllRecommendations(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """
+        Retrieve all recommendations across all strategies, sorted by date descending.
+        
+        Args:
+            limit: Maximum number of recommendations to return
+        
+        Returns:
+            List of recommendation dicts with 'strategy' field added to each
+        """
+        with self._lock:
+            allRecs = []
+            for strategyName, recs in self._recommendationHistory.items():
+                for rec in recs:
+                    recWithStrategy = rec.copy()
+                    recWithStrategy['strategy'] = strategyName
+                    allRecs.append(recWithStrategy)
+            
+            # Sort by date descending (most recent first)
+            allRecs.sort(key=lambda r: r.get('date', ''), reverse=True)
+            return allRecs[:limit]
 
 
 # EPSILON-GREEDY STRATEGY SELECTOR
@@ -716,17 +772,21 @@ class StrategySelector:
     Balances exploitation (use top performer) with exploration (try others).
     """
     
-    def __init__(self, strategies: Dict[str, TradingStrategy], epsilon: float = 0.2, 
+    def __init__(self, strategies: Dict[str, TradingStrategy], preferredStrategy: Optional[str] = None, epsilon: float = 0.2, 
                  minTradesRequired: int = 3):
         """
-        Initialise strategy selector.
+        Initialise strategy selector with optional preferred strategy.
+        
+        If a preferred strategy is set and available, it will be prioritised over others.
         
         Args:
             strategies: Dict mapping strategy names to TradingStrategy instances
+            preferredStrategy: Optional strategy name to preferentially select
             epsilon: Probability of random exploration (default: 0.2 = 20% random)
             minTradesRequired: Minimum trades per strategy before ranking (default: 3)
         """
         self.strategies = strategies
+        self.preferredStrategy = preferredStrategy
         self.epsilon = epsilon
         self.minTradesRequired = minTradesRequired
         self._selectionHistory = []  
@@ -734,8 +794,9 @@ class StrategySelector:
     def selectStrategy(self, performanceMetrics: Dict[str, Dict], 
                       currentTradeCount: int) -> str:
         """
-        Select a strategy using epsilon-greedy approach.
+        Select a strategy using epsilon-greedy approach with preferred strategy support.
         
+        If a preferred strategy is set and available, it has priority.
         Exploration mode (uniform random): if tradeCount < minTradesRequired
         Exploitation mode: with prob epsilon, random; else highest profitFactor
         
@@ -750,6 +811,12 @@ class StrategySelector:
         import numpy as np
         
         availableStrategies = list(self.strategies.keys())
+        
+        # If a preferred strategy is set and available, use it
+        if self.preferredStrategy and self.preferredStrategy in availableStrategies:
+            logger.info(f"[StrategySelector] Using preferred strategy: {self.preferredStrategy}")
+            self._selectionHistory.append(self.preferredStrategy)
+            return self.preferredStrategy
         
         # Exploration mode: random until sufficient data
         if currentTradeCount < self.minTradesRequired:
@@ -897,7 +964,7 @@ class Agent:
         
         logger.info(f"Agent {self.agentId}: Initialised {len(self.strategies)} strategies: {list(self.strategies.keys())}")
         
-        self.strategySelector = StrategySelector(self.strategies, epsilon=0.35, minTradesRequired=2)
+        self.strategySelector = StrategySelector(self.strategies, preferredStrategy=self.preferredStrategy, epsilon=0.35, minTradesRequired=2)
     
     # LIFECYCLE CONTROL
     
@@ -959,6 +1026,16 @@ class Agent:
         # Increment timestep counter for tracking purposes
         self._timestepCounter += 1
         
+        # Train LSTM periodically during simulation (every 10 timesteps)
+        if 'LSTM' in self.strategies and self._timestepCounter % 10 == 0:
+            try:
+                buffer_size = len(self.strategies['LSTM'].replayBuffer)
+                if buffer_size >= 16:  # Only train if we have enough experience
+                    logger.info(f"Agent {self.agentId}: Intermediate LSTM training at timestep {self._timestepCounter} (buffer size: {buffer_size})")
+                    self.strategies['LSTM'].train(batchSize=16, epochs=1)
+            except Exception as e:
+                logger.error(f"Agent {self.agentId}: Intermediate LSTM training failed: {e}")
+        
         # Get all tickers for this market
         tickers = self.MIC_TICKERS.get(self.mic, [])
         if not tickers:
@@ -972,6 +1049,7 @@ class Agent:
             metrics = self.performanceTracker.getAllMetrics()
             selected_strategy_name = self.strategySelector.selectStrategy(metrics, self.totalTrades)
             selected_strategy = self.strategies[selected_strategy_name]
+            print(f"[Agent {self.agentId}] Timestep {self._timestepCounter}: Selected strategy {selected_strategy_name}")
         except Exception as e:
             print(f"[Agent {self.agentId}] ERROR: Strategy selection failed - {e}")
             logger.error(f"Agent {self.agentId}: strategy selection failed: {e}")
@@ -1083,6 +1161,8 @@ class Agent:
                     return
                 print(f"[Agent {self.agentId}] SUCCESS: LONG {ticker} x{quantity} via {strategyName}")
                 logger.info(f"Agent {self.agentId}: LONG {ticker} x{quantity} executed via {strategyName}")
+                self.totalTrades += 1
+                print(f"[TRADE LOG] TOTAL TRADES INCREMENTED to {self.totalTrades}")
             elif action == 'short':
                 print(f"[Agent {self.agentId}] EXECUTING SHORT: {ticker} x{quantity}")
                 result = exchange.placeShort(ticker, self.mic, quantity, self.accountId, simDate, 
@@ -1093,6 +1173,8 @@ class Agent:
                     return
                 print(f"[Agent {self.agentId}] SUCCESS: SHORT {ticker} x{quantity} via {strategyName}")
                 logger.info(f"Agent {self.agentId}: SHORT {ticker} x{quantity} executed via {strategyName}")
+                self.totalTrades += 1
+                print(f"[TRADE LOG] TOTAL TRADES INCREMENTED to {self.totalTrades}")
             elif action == 'sell':
                 # Sell existing long position
                 portfolio = exchange.checkPortfolio(self.accountId, simDate)
@@ -1114,6 +1196,8 @@ class Agent:
                             return
                         print(f"[Agent {self.agentId}] SUCCESS: SOLD {ticker} x{sell_qty} via {strategyName}")
                         logger.info(f"Agent {self.agentId}: SOLD {ticker} x{sell_qty} executed via {strategyName}")
+                        self.totalTrades += 1
+                        print(f"[TRADE LOG] TOTAL TRADES INCREMENTED to {self.totalTrades}")
                     else:
                         logger.info(f"Agent {self.agentId}: No long position to sell for {ticker}")
                         return
@@ -1121,7 +1205,7 @@ class Agent:
                     logger.info(f"Agent {self.agentId}: No portfolio data for {ticker}")
                     return
             
-            self.totalTrades += 1
+            # Log execution (but don't double-count - trades are already incremented above)
             self._executionLog.append({
                 'strategy': strategyName,
                 'ticker': ticker,

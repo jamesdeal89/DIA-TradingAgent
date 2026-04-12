@@ -73,7 +73,9 @@ def logSimulationFinalResults(accountId: int, agent, exchange, agentData=None, c
         # Train LSTM strategy at episode end
         if 'LSTM' in agent.strategies:
             try:
+                logger.info(f"Agent {agent.agentId}: Starting LSTM training at episode end")
                 agent.strategies['LSTM'].train(batchSize=32, epochs=1)
+                logger.info(f"Agent {agent.agentId}: LSTM training completed")
             except Exception as e:
                 logger.error(f"LSTM training failed: {e}")
         
@@ -131,6 +133,27 @@ def logSimulationFinalResults(accountId: int, agent, exchange, agentData=None, c
         except Exception as e:
             print(f"Note: Could not format strategy comparison: {e}")
             print()
+        
+        # DEBUG: Print detailed trade history from performance tracker
+        try:
+            print("[DEBUG] DETAILED TRADE HISTORY FROM PERFORMANCE TRACKER:")
+            total_trades_recorded = 0
+            if hasattr(agent.performanceTracker, '_tradeHistory'):
+                for strategy_name in sorted(agent.performanceTracker._tradeHistory.keys()):
+                    trades = agent.performanceTracker._tradeHistory[strategy_name]
+                    if trades:
+                        total_trades_recorded += len(trades)
+                        print(f"\n{strategy_name}: {len(trades)} total trades")
+                        for i, trade in enumerate(trades):
+                            print(f"  {i+1}. {trade['ticker']:6s} {trade['quantity']:4d}@${trade['entryPrice']:8.2f} -> ${trade['exitPrice']:8.2f} = ${trade['pnl']:10.2f}")
+                        total_pnl = sum(t['pnl'] for t in trades)
+                        print(f"  TOTAL P&L: ${total_pnl:,.2f}")
+            print(f"\nTOTAL TRADES RECORDED: {total_trades_recorded}")
+            print(f"TOTAL TRADES PLACED (from log): {agent.totalTrades}")
+            print(f"MISSING TRADES: {agent.totalTrades - total_trades_recorded}")
+            print()
+        except Exception as e:
+            print(f"[DEBUG] Could not print trade history: {e}\n")
         
         # HOLD recommendation quality analysis
         try:
@@ -217,17 +240,31 @@ def runAgentTradeLoop(accountId, agentData, exchange):
                 lastValidSimDate = simDate
                 endDate = agent.getEndDate()
                 currentDate = datetime.strptime(simDate, '%Y-%m-%d')
+                decisionPeriod = agent.getDecisionPeriod()
+                nextDate = (currentDate + timedelta(days=decisionPeriod)).strftime('%Y-%m-%d')
+                nextDateTime = datetime.strptime(nextDate, '%Y-%m-%d')
                 
+                # Check if NEXT timestep would exceed boundaries - if so, this is the last one
+                willExceedBoundary = False
                 if endDate:
-                    # If end date is explicitly set, use it for historical experiments
+                    endDateTime = datetime.strptime(endDate, '%Y-%m-%d')
+                    if nextDateTime > endDateTime:
+                        willExceedBoundary = True
+                elif maxNewsDate and nextDate > maxNewsDate:
+                    willExceedBoundary = True
+                elif nextDate >= todayDate:
+                    willExceedBoundary = True
+                
+                # If already past boundary, stop immediately
+                if endDate:
                     endDateTime = datetime.strptime(endDate, '%Y-%m-%d')
                     if currentDate > endDateTime:
                         print(f"DEBUG: Simulation reached configured end date ({endDate}). Stopping agent.")
                         hasReachedLimit = True
-                elif maxNewsDate and simDate >= maxNewsDate:
+                elif maxNewsDate and simDate > maxNewsDate:
                     print(f"DEBUG: Simulation reached max news date ({maxNewsDate}). Stopping agent.")
                     hasReachedLimit = True
-                elif simDate >= todayDate:
+                elif simDate > todayDate:
                     print(f"DEBUG: Simulation reached today's date ({todayDate}). Stopping agent.")
                     hasReachedLimit = True
                 
@@ -235,7 +272,6 @@ def runAgentTradeLoop(accountId, agentData, exchange):
                     agentData['threadActive'] = False
                     agentData['threadRunning'] = False
                     print(f"DEBUG: Agent {accountId} simulation ended at {simDate}.")
-                    # Log final results using the last simulation date
                     logSimulationFinalResults(accountId, agent, exchange, agentData, lastValidSimDate)
                     break
             
@@ -244,11 +280,10 @@ def runAgentTradeLoop(accountId, agentData, exchange):
             
             # Auto-advance date (skip in realtime mode)
             if not isRealtimeMode:
-                # Advance by decision period
+                # Only advance if next date won't exceed end date
                 decisionPeriod = agent.getDecisionPeriod()
                 nextDate = (datetime.strptime(simDate, '%Y-%m-%d') + timedelta(days=decisionPeriod)).strftime('%Y-%m-%d')
                 
-                # Only advance if next date won't exceed end date
                 shouldAdvance = True
                 endDate = agent.getEndDate()
                 if endDate:
@@ -256,6 +291,11 @@ def runAgentTradeLoop(accountId, agentData, exchange):
                     nextDateTime = datetime.strptime(nextDate, '%Y-%m-%d')
                     if nextDateTime > endDateTime:
                         shouldAdvance = False
+                        print(f"DEBUG: Next timestep ({nextDate}) would exceed end date ({endDate}). Stopping after this timestep.")
+                        agentData['threadActive'] = False
+                        agentData['threadRunning'] = False
+                        # Log final results when end date reached
+                        logSimulationFinalResults(accountId, agent, exchange, agentData, simDate)
                 
                 if shouldAdvance:
                     agent.setSimDate(nextDate)
@@ -361,9 +401,9 @@ def chatGUI():
         st.divider()
         st.subheader("Start a New Agent")
         with st.form("newAgent"):
-            mic = st.selectbox("Market (MIC)", ["XLON", "XNAS", "XHKG", "XJPX"])
-            prefStrategy = st.selectbox("Preferred strategy (optional)", ["None", "Sentiment", "MeanReversion", "Technical", "Fundamental"])
-            banned = st.multiselect("Banned strategies (optional)", ["Sentiment", "MeanReversion", "Technical", "Fundamental"])
+            mic = st.selectbox("Market (MIC)", ["XLON", "XNAS", "XHKG", "XJPX"], index=1)
+            prefStrategy = st.selectbox("Preferred strategy (optional)", ["None", "Sentiment", "MeanReversion", "Technical", "Fundamental", "DeepQL", "LSTM"])
+            banned = st.multiselect("Banned strategies (optional)", ["Sentiment", "MeanReversion", "Technical", "Fundamental", "DeepQL", "LSTM"])
             
             # Simulation mode selection
             simMode = st.radio("Simulation mode", ["Historical (backtest)", "Realtime (live)"], horizontal=True)
@@ -566,8 +606,8 @@ def chatGUI():
                         st.session_state[messagesKey].append({"role": "ai", "content": response})
                     
                     elif intentLabel == "actions":
-                        recentTrades = agent._executionLog
-                        response = ResponseFormatter.formatRecentTrades(recentTrades, limit=10)
+                        recentActions = agent.performanceTracker.getAllRecommendations(limit=20)
+                        response = ResponseFormatter.formatRecentActions(recentActions, limit=20)
                         
                         # Display response
                         with st.chat_message("assistant"):

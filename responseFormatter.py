@@ -130,6 +130,40 @@ class ResponseFormatter:
         return "\n".join(lines)
     
     @staticmethod
+    def formatRecentActions(recommendations: List[Dict[str, Any]], limit: int = 20) -> str:
+        """
+        Format recent strategy recommendations (including LONG, SHORT, HOLD, SELL).
+        
+        Args:
+            recommendations: List of recommendation dicts from getAllRecommendations()
+            limit: Max recommendations to display
+        
+        Returns:
+            Formatted recent actions (markdown table)
+        """
+        if not recommendations:
+            return "No recommendation history."
+        
+        lines = []
+        lines.append(f"Recent Strategy Recommendations (last {min(limit, len(recommendations))})")
+        lines.append("")
+        
+        # Markdown table header
+        lines.append("| Date | Action | Ticker | Confidence | Strategy |")
+        lines.append("|---|---|---|---|---|")
+        
+        for rec in recommendations[-limit:]:
+            action_str = rec.get('action', 'HOLD').upper()
+            ticker = rec.get('ticker', '?')
+            confidence = rec.get('confidence', 0) * 100
+            strategy = rec.get('strategy', 'Unknown')
+            date = rec.get('date', '?')
+            
+            lines.append(f"| {date} | {action_str} | {ticker} | {confidence:.0f}% | {strategy} |")
+        
+        return "\n".join(lines)
+    
+    @staticmethod
     def formatAgentStatus(agentId: int, isRunning: bool, isPaused: bool, 
                          totalTrades: int, currentDate: str = None) -> str:
         """

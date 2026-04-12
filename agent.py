@@ -22,6 +22,7 @@ import numpy as np
 from datetime import datetime, timedelta
 from tradingStrategy import TradingStrategy
 from qLearningStrategy import DeepQLearningStrategy
+from lstmStrategy import LSTMStrategy
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -77,19 +78,19 @@ class SentimentStrategy(TradingStrategy):
             # Calculate average sentiment score across all collected headlines
             avg_score = sum(all_scores) / len(all_scores) if all_scores else 0.0
             
-            # Determine action based on sentiment (threshold 0.05 for reasonable signal detection)
-            if avg_score > 0.05:
+            # Determine action based on sentiment (threshold 0.01 - very sensitive to any sentiment)
+            if avg_score > 0.01:
                 return {
                     'action': 'long',
-                    'confidence': min(0.95, abs(avg_score)),
+                    'confidence': min(0.95, abs(avg_score) * 2),  # Scale confidence with lower threshold
                     'reason': f'Positive sentiment ({avg_score:.2f}) from {headline_count} headlines over {analysisPeriod} days',
                     'targetQuantity': 1
                 }
-            elif avg_score < -0.05:
+            elif avg_score < -0.01:
                 # Recommend selling longs if sentiment is negative (agent checks portfolio)
                 return {
                     'action': 'sell',
-                    'confidence': min(0.95, abs(avg_score)),
+                    'confidence': min(0.95, abs(avg_score) * 2),  # Scale confidence with lower threshold
                     'reason': f'Negative sentiment ({avg_score:.2f}) - exit long positions',
                     'targetQuantity': 0
                 }
@@ -157,8 +158,8 @@ class MeanReversionStrategy(TradingStrategy):
             # Calculate z-score (how many std devs away from mean)
             z_score = (current_price - mean_price) / std_price if std_price > 0 else 0
             
-            # Trading logic (lower threshold 1.0 for more frequent trades)
-            threshold = 1.0
+            # Trading logic (threshold 0.3 generates signals ~24% of time - more aggressive)
+            threshold = 0.3
             
             if z_score < -threshold:  # Price is threshold+ std devs below mean
                 return {
@@ -239,15 +240,15 @@ class TechnicalStrategy(TradingStrategy):
             reason = ""
             action = 'hold'
             
-            # RSI signals (strongest signal)
+            # RSI signals (strongest signal) - be more selective to reduce dominance
             if rsi is not None:
-                if rsi > 70:
+                if rsi > 75:  # Raised to 75 - only extreme overbought
                     action = 'short'
-                    confidence = max(confidence, (rsi - 70) / 30)  # 0.0-1.0
+                    confidence = max(confidence, (rsi - 75) / 25)  # 0.0-1.0
                     reason = f"RSI {rsi:.1f} overbought"
-                elif rsi < 30:
+                elif rsi < 25:  # Raised to 25 - only extreme oversold
                     action = 'long'
-                    confidence = max(confidence, (30 - rsi) / 30)  # 0.0-1.0
+                    confidence = max(confidence, (25 - rsi) / 25)  # 0.0-1.0
                     reason = f"RSI {rsi:.1f} oversold"
                 else:
                     # Neutral RSI: provide confidence based on proximity to extremes
@@ -273,10 +274,10 @@ class TechnicalStrategy(TradingStrategy):
                     reason = "MACD bearish crossover" if reason == "" else reason
             
             # If overbought, recommend selling (agent will check portfolio before executing)
-            if rsi is not None and rsi > 70:
+            if rsi is not None and rsi > 75:
                 action = 'sell'
-                confidence = max(confidence, (rsi - 70) / 30)
-                reason = f"Selling overbought position (RSI {rsi:.1f})"
+                confidence = max(confidence, (rsi - 75) / 25)
+                reason = f"Selling overbought RSI position ({rsi:.1f})"
             
             return {
                 'action': action,
@@ -376,15 +377,15 @@ class FundamentalStrategy(TradingStrategy):
             price_today = data['Close'].iloc[-1]
             momentum = (price_today - price_ago) / price_ago
             
-            # Decision logic: lower momentum threshold (0.03) and higher volatility tolerance for more trades
-            if momentum > 0.03 and volatility < 0.06:
+            # Decision logic: threshold 0.005 (very sensitive) and volatility tolerance for more trades
+            if momentum > 0.005 and volatility < 0.15:
                 return {
                     'action': 'long',
                     'confidence': min(0.8, 0.4 + momentum),
-                    'reason': f'Strong momentum ({momentum*100:.1f}%) over {lookback_window}d with controlled volatility',
+                    'reason': f'Positive momentum ({momentum*100:.1f}%) over {lookback_window}d',
                     'targetQuantity': 1
                 }
-            elif momentum < -0.03 and volatility < 0.06:
+            elif momentum < -0.005 and volatility < 0.15:
                 # Weak momentum = recommend selling longs (agent checks portfolio)
                 return {
                     'action': 'sell',
@@ -437,7 +438,7 @@ class PerformanceTracker:
         self._recommendationHistory: Dict[str, List[Dict]] = {}  
     
     def recordTrade(self, strategyName: str, entryPrice: float, exitPrice: float, 
-                   quantity: int, ticker: str, entryDate: str, exitDate: str) -> None:
+                   quantity: int, ticker: str, entryDate: str, exitDate: str, tradeType: str = 'long') -> None:
         """
         Record a closed trade for a strategy.
         
@@ -449,12 +450,17 @@ class PerformanceTracker:
             ticker: Stock ticker
             entryDate: Trade entry date (YYYY-MM-DD)
             exitDate: Trade exit date (YYYY-MM-DD)
+            tradeType: 'long' or 'short' for correct P&L calculation
         """
         with self._lock:
             if strategyName not in self._tradeHistory:
                 self._tradeHistory[strategyName] = []
             
-            pnl = (exitPrice - entryPrice) * quantity
+            # Calculate P&L correctly based on trade type
+            if tradeType == 'short':
+                pnl = (entryPrice - exitPrice) * quantity
+            else:  # default to long
+                pnl = (exitPrice - entryPrice) * quantity
             trade = {
                 'ticker': ticker,
                 'entryPrice': entryPrice,
@@ -878,6 +884,7 @@ class Agent:
             'Technical': TechnicalStrategy(),
             'Fundamental': FundamentalStrategy(),
             'DeepQL': DeepQLearningStrategy(),
+            'LSTM': LSTMStrategy(),
         }
         
         # Apply bans

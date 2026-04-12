@@ -9,9 +9,12 @@ from datetime import datetime, timedelta
 import threading
 import time
 import uuid
+import logging
 from agent import Agent
 from stockExchange import StockExchange
 from responseFormatter import ResponseFormatter
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -31,9 +34,61 @@ def initialiseStockExchange():
 def logSimulationFinalResults(accountId: int, agent, exchange, agentData=None):
     """
     Log final simulation results to console using responseFormatter summaries.
+    First closes all open positions to get true final P&L.
     """
     try:
-        print(f"\n{'='*80}")
+        # Check for open positions BEFORE closing
+        print(f"\nChecking for open positions before closing...")
+        cursor = exchange.connection.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) FROM portfolios WHERE accountId = %s AND closed IS FALSE",
+            (accountId,)
+        )
+        open_count_before = cursor.fetchone()[0]
+        print(f"Open positions before: {open_count_before}")
+        
+        # Get portfolio value BEFORE closing
+        cursor.execute(
+            "SELECT snapshotDate, cashBalance, portfolioValue, totalValue FROM portfolio_history WHERE accountId = %s ORDER BY snapshotDate DESC LIMIT 1",
+            (accountId,)
+        )
+        portfolio_before = cursor.fetchone()
+        if portfolio_before:
+            print(f"Portfolio before close: Cash=${portfolio_before[1]:,.2f}, Holdings=${portfolio_before[2]:,.2f}, Total=${portfolio_before[3]:,.2f}")
+        cursor.close()
+        
+        # Close all open positions to get true final P&L
+        print(f"\nClosing all open positions at {agent.simDate}...")
+        positions_closed = exchange.closeAllOpenPositions(agent.accountId, agent.simDate, agent.agentId)
+        print(f"Closed {positions_closed} open position(s)")
+        
+        # Train LSTM strategy at episode end
+        if 'LSTM' in agent.strategies:
+            try:
+                agent.strategies['LSTM'].train(batchSize=32, epochs=1)
+            except Exception as e:
+                logger.error(f"LSTM training failed: {e}")
+        
+        # Check for REMAINING open positions AFTER closing
+        cursor = exchange.connection.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) FROM portfolios WHERE accountId = %s AND closed IS FALSE",
+            (accountId,)
+        )
+        open_count_after = cursor.fetchone()[0]
+        print(f"Open positions after: {open_count_after}")
+        if open_count_after > 0:
+            cursor.execute(
+                "SELECT ticker, tradeType, quantity FROM portfolios WHERE accountId = %s AND closed IS FALSE",
+                (accountId,)
+            )
+            remaining = cursor.fetchall()
+            print(f"WARNING: Still have unclosed positions: {remaining}")
+        cursor.close()
+        
+        print()
+        
+        print(f"{'='*80}")
         print(f"SIMULATION FINAL RESULTS - Agent {accountId}")
         print(f"{'='*80}")
         start_date = agentData.get('simDate') if agentData else 'Unknown'
@@ -43,13 +98,19 @@ def logSimulationFinalResults(accountId: int, agent, exchange, agentData=None):
         print(f"Total Trades: {agent.totalTrades}")
         print()
         
-        # Portfolio summary
+        # Portfolio summary from history
         try:
-            portfolio = exchange.getPortfolioValue(agent.accountId)
-            balance = exchange.getBalance(agent.accountId)
-            print("PORTFOLIO SUMMARY:")
-            print(ResponseFormatter.formatPortfolioSummary(portfolio, balance))
-            print()
+            portfolio_history = exchange.getPortfolioHistory(agent.accountId)
+            if not portfolio_history.empty:
+                print("PORTFOLIO SUMMARY:")
+                latest = portfolio_history.iloc[-1]
+                print(f"Final Cash Balance: ${latest['cashBalance']:,.2f}")
+                print(f"Final Portfolio Value: ${latest['portfolioValue']:,.2f}")
+                print(f"Final Total Value: ${latest['totalValue']:,.2f}")
+                print()
+            else:
+                print("PORTFOLIO SUMMARY: No portfolio history available.")
+                print()
         except Exception as e:
             print(f"Note: Could not retrieve portfolio summary: {e}")
             print()
@@ -63,15 +124,42 @@ def logSimulationFinalResults(accountId: int, agent, exchange, agentData=None):
             print(f"Note: Could not format strategy comparison: {e}")
             print()
         
-        # Recent closed trades
+        # HOLD recommendation quality analysis
         try:
-            print("RECENT CLOSED TRADES (Last 5):")
-            closed_trades = exchange.getClosedTrades(agent.accountId, limit=5)
+            print("HOLD RECOMMENDATION ANALYSIS:")
+            recommendationMetrics = {}
+            for strategyName in agent.strategies.keys():
+                recommendationMetrics[strategyName] = agent.performanceTracker.getRecommendationMetrics(strategyName)
+            
+            hold_analysis = ResponseFormatter.formatRecommendationQuality(recommendationMetrics)
+            print(hold_analysis)
+            print()
+        except Exception as e:
+            print(f"Note: Could not retrieve HOLD analysis: {e}")
+            print()
+        
+        # Recent closed trades - with emphasis on recently closed ones
+        try:
+            print("RECENTLY CLOSED TRADES AT SIMULATION END:")
+            closed_trades = exchange.getClosedTradesPnL(agent.accountId)
             if closed_trades:
-                print(ResponseFormatter.formatClosedTrades(closed_trades, limit=5))
+                # Sort by date and show last 10
+                sorted_trades = sorted(closed_trades, key=lambda x: x.get('exitDate', ''), reverse=True)[:10]
+                print(f"Total closed trades in DB: {len(closed_trades)}")
+                print(f"Showing last 10 closed trades:")
+                for trade in sorted_trades:
+                    ticker = trade.get('ticker', 'N/A')
+                    trade_type = trade.get('tradeType', 'N/A')
+                    entry = trade.get('entryPrice', 0)
+                    exit_price = trade.get('exitPrice', 0)
+                    pnl = trade.get('pnl', 0)
+                    pnl_pct = trade.get('pnlPercent', 0)
+                    exit_date = trade.get('exitDate', 'N/A')
+                    print(f"  {ticker:6s} {trade_type:6s} | Entry ${entry:7.2f} -> Exit ${exit_price:7.2f} | P&L ${pnl:8.2f} ({pnl_pct:6.1f}%) | {exit_date}")
+                print()
             else:
                 print("No closed trades recorded.")
-            print()
+                print()
         except Exception as e:
             print(f"Note: Could not retrieve closed trades: {e}")
             print()
@@ -267,7 +355,7 @@ def chatGUI():
                 endDate = None
             else:
                 with st.container(border=True):
-                    st.caption("Historical Simulation Settings (for Repeatability)")
+                    st.caption("Historical Simulation Settings")
                     col_start, col_end = st.columns(2)
                     with col_start:
                         simDate = st.date_input("Start date", value=datetime(2011, 1, 1), min_value=datetime(1990, 1, 1), max_value=datetime.now(), key="sim_start")

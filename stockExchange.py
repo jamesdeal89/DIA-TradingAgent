@@ -246,7 +246,7 @@ class StockExchange:
             print(f"ERROR: Unable to fetch price for {ticker}: {e}")
             return 0.0
 
-    def placeShort(self, ticker, mic, quantity, accountId, simDate, strategyName=None, agentId=None):
+    def placeShort(self, ticker, mic, quantity, accountId, simDate, strategyName: str, agentId=None):
         '''
         Short (with automated borrowing) - sell a stock not owned via borrowing the stock. 
         Automatically borrows the stock at current price, then immediately sells it.
@@ -257,12 +257,16 @@ class StockExchange:
         The agent can act on historical data to enable repeatability of experiments.
 
         No balance check performed as the stock is not being 'bought'.
-        Returns -1 if accountId does not exist.
+        Returns -1 if accountId does not exist or strategyName is empty.
         
         Args:
-            strategyName: Optional name of strategy initiating this trade (for performance tracking)
+            strategyName: REQUIRED - name of strategy initiating this trade (for performance tracking)
             agentId: Optional agent ID for tracking
         '''
+        # Validate strategyName is provided
+        if not strategyName:
+            print(f"ERROR: strategyName is required to place a short")
+            return -1
         # Add current price of shorted stock to account balance.
         try:
             price = self._getSafePrice(ticker, mic, simDate)
@@ -284,7 +288,7 @@ class StockExchange:
             print(f"ERROR: Account with ID {accountId} does not exist.")
             return -1
         
-    def placeLong(self, ticker, mic, quantity, accountId, simDate, strategyName=None, agentId=None):
+    def placeLong(self, ticker, mic, quantity, accountId, simDate, strategyName: str, agentId=None):
         '''
         Long - purchase stock outright.
         Stock is bought for current market price. Stock is added to portfolio.
@@ -292,9 +296,13 @@ class StockExchange:
         The balance of account with passed ID will be checked: returns -1 if not enough balance / accountId does not exist.
         
         Args:
-            strategyName: Optional name of strategy initiating this trade (for performance tracking)
+            strategyName: REQUIRED - name of strategy initiating this trade (for performance tracking)
             agentId: Optional agent ID for tracking
         '''
+        # Validate strategyName is provided
+        if not strategyName:
+            print(f"ERROR: strategyName is required to place a long")
+            return -1
         # Fetch current price as of close.
         try:
             price = self._getSafePrice(ticker, mic, simDate)
@@ -341,12 +349,12 @@ class StockExchange:
 
     def checkPortfolio(self, accountId, simDate):
         '''
-        Returns a Pandas dataframe of all of the currently held positions.
+        Returns a Pandas dataframe of all of the currently held OPEN positions.
         Includes held assets as well as open shorts. 
         Gracefully handles exceptions - returns None if failed for any reason.
         '''
         self.checkAndAutoCloseShorts(accountId, simDate)
-        query = "SELECT * FROM portfolios WHERE accountId = %s"
+        query = "SELECT * FROM portfolios WHERE accountId = %s AND closed IS FALSE"
         cursor = self.connection.cursor()
         try:
             cursor.execute(query, (accountId,))
@@ -421,7 +429,8 @@ class StockExchange:
                     quantity=quantity,
                     ticker=ticker,
                     entryDate=entryDate,
-                    exitDate=simDate
+                    exitDate=simDate,
+                    tradeType='long'
                 )
             
             return 0
@@ -494,7 +503,8 @@ class StockExchange:
                     quantity=quantity,
                     ticker=ticker,
                     entryDate=entryDateStr,
-                    exitDate=simDate
+                    exitDate=simDate,
+                    tradeType='short'
                 )
             
             return 0
@@ -660,7 +670,8 @@ class StockExchange:
                             quantity=quantity,
                             ticker=ticker,
                             entryDate=entryDateStr,
-                            exitDate=currentDate
+                            exitDate=currentDate,
+                            tradeType='short'
                         )
         except Error as e:
             print(f"ERROR in checkAndAutoCloseShorts: {e}")
@@ -668,24 +679,90 @@ class StockExchange:
             cursor.close()
         
         return closed_count
+    
+    def closeAllOpenPositions(self, accountId: int, currentDate: str, agentId: int = None) -> int:
+        '''
+        Close ALL open positions (both longs and shorts) at current market price.
+        Used at end of simulation to get true final P&L.
+        
+        Args:
+            accountId: Account to process
+            currentDate: Current simulation date (YYYY-MM-DD)
+            agentId: Optional agent ID for portfolio snapshot logging
+        
+        Returns:
+            Number of positions closed
+        '''
+        closed_count = 0
+        cursor = self.connection.cursor()
+        
+        try:
+            # Get all open longs
+            query_longs = """
+                SELECT ticker, mic, quantity, strategyName, entryPrice, entryDate
+                FROM portfolios
+                WHERE accountId = %s AND tradeType = 'long' AND closed IS FALSE
+            """
+            cursor.execute(query_longs, (accountId,))
+            open_longs = cursor.fetchall()
+            
+            for ticker, mic, quantity, strategyName, entryPrice, entryDate in open_longs:
+                try:
+                    current_price = self._getSafePrice(ticker, mic, currentDate)
+                    self.sellLong(accountId, ticker, mic, quantity, currentDate, strategyName, entryPrice, entryDate)
+                    closed_count += 1
+                    print(f"Closed open long: {ticker} {quantity} shares @ ${current_price:.2f}")
+                except Exception as e:
+                    print(f"Warning: Could not close long {ticker}: {e}")
+            
+            # Get all open shorts
+            query_shorts = """
+                SELECT ticker, mic, quantity, strategyName, priceAtShort, entryDate
+                FROM portfolios
+                WHERE accountId = %s AND tradeType = 'short' AND closed IS FALSE
+            """
+            cursor.execute(query_shorts, (accountId,))
+            open_shorts = cursor.fetchall()
+            
+            for ticker, mic, quantity, strategyName, priceAtShort, entryDate in open_shorts:
+                try:
+                    current_price = self._getSafePrice(ticker, mic, currentDate)
+                    self.closeShort(accountId, ticker, mic, quantity, currentDate)
+                    closed_count += 1
+                    print(f"Closed open short: {ticker} {quantity} shares @ ${current_price:.2f}")
+                except Exception as e:
+                    print(f"Warning: Could not close short {ticker}: {e}")
+        
+        except Error as e:
+            print(f"ERROR in closeAllOpenPositions: {e}")
+        finally:
+            cursor.close()
+        
+        # Record a final portfolio snapshot after closures
+        if agentId:
+            self.logPortfolioSnapshot(accountId, agentId, currentDate)
+            print(f"Recorded final portfolio snapshot")
+        
+        return closed_count
 
     def recordTradePnL(self, accountId: int, strategyName: str, 
                       entryPrice: float, exitPrice: float, 
                       quantity: float, ticker: str,
-                      entryDate: str, exitDate: str) -> None:
+                      entryDate: str, exitDate: str, tradeType: str = 'long') -> None:
         '''
         Record P&L for a closed trade to the performance tracker.
         Called when a trade is manually closed (sellLong or closeShort).
         
         Args:
             accountId: Account ID
-            strategyName: Name of the strategy that initiated this trade
-            entryPrice: Price at which position was opened
+            strategyName: Name of the strategy that initiated this trade (NEVER null - enforced at position opening)
+            entryPrice: Price at which position was opened (for longs) or shorted (for shorts)
             exitPrice: Price at which position was closed
             quantity: Number of shares
             ticker: Stock ticker
             entryDate: Entry date (YYYY-MM-DD)
             exitDate: Exit date (YYYY-MM-DD)
+            tradeType: 'long' or 'short' to determine P&L formula
         '''
         if not self.performanceTracker or not strategyName:
             return
@@ -697,7 +774,7 @@ class StockExchange:
             entryPrice_float = float(entryPrice)
             exitPrice_float = float(exitPrice)
             
-            # Record trade to performance tracker
+            # Record trade to performance tracker with correct P&L calculation based on type
             self.performanceTracker.recordTrade(
                 strategyName,
                 entryPrice=entryPrice_float,
@@ -705,12 +782,19 @@ class StockExchange:
                 quantity=int(quantity_float),
                 ticker=ticker,
                 entryDate=entryDate,
-                exitDate=exitDate
+                exitDate=exitDate,
+                tradeType=tradeType
             )
             
-            pnl = (exitPrice_float - entryPrice_float) * quantity_float
+            # Calculate P&L: For longs (buy low, sell high): (exit - entry) * qty
+            # For shorts (sell high, buy low): (entry - exit) * qty
+            if tradeType == 'short':
+                pnl = (entryPrice_float - exitPrice_float) * quantity_float
+            else:  # default to long
+                pnl = (exitPrice_float - entryPrice_float) * quantity_float
+            
             pnl_pct = (pnl / (entryPrice_float * quantity_float)) * 100 if entryPrice_float > 0 else 0
-            print(f"Recorded trade for {strategyName}: {ticker} P&L=${pnl:.2f} ({pnl_pct:.2f}%)")
+            print(f"Recorded trade for {strategyName}: {ticker} ({tradeType}) P&L=${pnl:.2f} ({pnl_pct:.2f}%)")
         
         except Exception as e:
             print(f"ERROR recording trade P&L: {e}")

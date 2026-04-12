@@ -209,11 +209,12 @@ class LSTMStrategy(TradingStrategy):
             features = self._getSequenceFeatures(ticker, mic, simDate, exchange, lookbackDays)
             
             if features is None:
+                logger.info(f"LSTM {ticker}: insufficient historical data at {simDate} (need {lookbackDays} days)")
                 return {
                     'action': 'hold',
                     'confidence': 0.0,
                     'reason': f'Insufficient historical data (< {lookbackDays} days)',
-                    'targetQuantity': 0
+                    'targetQuantity': 1
                 }
             
             stateTensor = torch.FloatTensor(features).unsqueeze(0)
@@ -223,33 +224,38 @@ class LSTMStrategy(TradingStrategy):
             
             if random.random() < self.epsilon:
                 actionIdx = random.randint(0, len(self.actionSpace) - 1)
+                logger.debug(f"LSTM exploration: random action {actionIdx} ({self.actionSpace[actionIdx]})")
             else:
                 actionIdx = torch.argmax(qValues[0]).item()
+                logger.debug(f"LSTM exploitation: argmax action {actionIdx} ({self.actionSpace[actionIdx]}), Q-values={qValues[0].tolist()}")
             
             action = self.actionSpace[actionIdx]
-            confidence = abs(qValues[0][actionIdx].item())
+            
+            # Calculate confidence using softmax probability distribution (like DeepQL)
+            qProbs = torch.softmax(qValues[0], dim=0)
+            confidence = float(qProbs[actionIdx].item())
             
             actionMap = {
                 "BUY": "long",
-                "SELL": "hold",
+                "SELL": "sell",
                 "SHORT": "short",
-                "CLOSE": "hold"
+                "CLOSE": "sell"
             }
             
             return {
                 'action': actionMap[action],
-                'confidence': min(confidence, 1.0),
-                'reason': f'LSTM predicts {action} (Q={confidence:.3f}) over {lookbackDays}d',
-                'targetQuantity': 0
+                'confidence': confidence,
+                'reason': f'LSTM predicts {action} (Q={qValues[0][actionIdx].item():.3f}) over {lookbackDays}d',
+                'targetQuantity': 1
             }
         
         except Exception as e:
-            logger.error(f"Error in LSTM analysis for {ticker}: {e}")
+            logger.error(f"Error in LSTM analysis for {ticker} at {simDate}: {e}")
             return {
                 'action': 'hold',
                 'confidence': 0.0,
                 'reason': f'Analysis failed: {str(e)}',
-                'targetQuantity': 0
+                'targetQuantity': 1
             }
     
     def remember(self, state: np.ndarray, action: int, reward: float, 
@@ -272,9 +278,13 @@ class LSTMStrategy(TradingStrategy):
             epochs: Number of training iterations
         """
         if len(self.replayBuffer) < batchSize or self.network is None:
+            logger.debug(f"LSTM training skipped: buffer size {len(self.replayBuffer)} < batch size {batchSize}")
             return
         
-        for _ in range(epochs):
+        logger.info(f"LSTM training started: buffer size={len(self.replayBuffer)}, batch size={batchSize}, epochs={epochs}")
+        totalLoss = 0.0
+        
+        for epoch in range(epochs):
             batch = random.sample(self.replayBuffer, min(batchSize, len(self.replayBuffer)))
             
             states = torch.stack([torch.FloatTensor(b['state']) for b in batch])
@@ -290,7 +300,11 @@ class LSTMStrategy(TradingStrategy):
                 qTarget = rewards + (1 - dones) * self.gamma * qNext
             
             loss = self.lossFn(qPred, qTarget)
+            totalLoss += loss.item()
             
             self.optimiser.zero_grad()
             loss.backward()
             self.optimiser.step()
+        
+        avgLoss = totalLoss / epochs
+        logger.info(f"LSTM training completed: average loss={avgLoss:.6f}")

@@ -153,26 +153,32 @@ class StockExchange:
         # Instead returns default value '' if no match in dict.
         return f"{ticker}{suffix.get(mic, '')}"
     
-    def _getSafePrice(self, ticker, mic, simDate):
+    def getPrice(self, ticker: str, mic: str, simDate: str = None) -> float:
         '''
-        Safely gets the price for a stock.
-        Returns the last close price, or raises ValueError if data is unavailable (delisted stocks).
+        Get price for a ticker on a given date.
+        Raises ValueError if data is unavailable; caller handles errors as needed.
         
         Args:
-            ticker: Stock ticker
-            mic: Market identifier code
-            simDate: Simulation date
+            ticker: Stock ticker symbol (e.g., 'AAPL', '0700')
+            mic: Market Identifier Code (e.g., 'XNAS', 'XLON', 'XHKG', 'XJPX')
+            simDate: Date for historical price (YYYY-MM-DD). If None, uses latest.
         
         Returns:
-            float: Last close price
+            float: Close price on specified date
         
         Raises:
-            ValueError: If stock is delisted or has no data
+            ValueError: If stock is delisted or has no data on that date
         '''
         try:
-            data = self.getStockData(self.__getMicTicker(ticker, mic), end=simDate)
+            micTicker = self.__getMicTicker(ticker, mic)
+            if simDate:
+                data = self.getStockData(micTicker, end=simDate)
+            else:
+                data = self.getStockData(micTicker, period='1d')
+            
             if data is None or data.empty or 'Close' not in data.columns:
                 raise ValueError(f"No price data available for {ticker} on {simDate}. Stock may be delisted.")
+            
             price = float(data['Close'].iloc[-1])
             return price
         except (IndexError, KeyError) as e:
@@ -218,34 +224,6 @@ class StockExchange:
             return stock.history(start=start, end=end)
         return stock.history(period=period)
 
-    def getCurrentPrice(self, ticker: str, mic: str, simDate: str = None) -> float:
-        '''
-        Get current or historical price for a ticker.
-        
-        Args:
-            ticker: Stock ticker symbol (e.g., 'AAPL')
-            mic: Market Identifier Code (e.g., 'XNAS', 'XLON')
-            simDate: Optional date for historical price (YYYY-MM-DD). If None, uses latest.
-        
-        Returns:
-            Price as float. Returns 0.0 if unable to fetch.
-        '''
-        try:
-            micTicker = self.__getMicTicker(ticker, mic)
-            if simDate:
-                data = self.getStockData(micTicker, end=simDate)
-            else:
-                data = self.getStockData(micTicker, period='1d')
-            
-            if data is not None and len(data) > 0:
-                return float(data['Close'].iloc[-1])
-            else:
-                print(f"ERROR: No price data for {ticker} on {simDate}")
-                return 0.0
-        except Exception as e:
-            print(f"ERROR: Unable to fetch price for {ticker}: {e}")
-            return 0.0
-
     def placeShort(self, ticker, mic, quantity, accountId, simDate, strategyName: str, agentId=None):
         '''
         Short (with automated borrowing) - sell a stock not owned via borrowing the stock. 
@@ -263,7 +241,6 @@ class StockExchange:
             strategyName: REQUIRED - name of strategy initiating this trade (for performance tracking)
             agentId: Optional agent ID for tracking
         '''
-        print(f"[TRADE LOG] placeShort INITIATED: {ticker} x{quantity} @ {simDate} strategy={strategyName}")
         # Validate strategyName is provided
         if not strategyName:
             print(f"ERROR: strategyName is required to place a short")
@@ -300,7 +277,6 @@ class StockExchange:
             strategyName: REQUIRED - name of strategy initiating this trade (for performance tracking)
             agentId: Optional agent ID for tracking
         '''
-        print(f"[TRADE LOG] placeLong INITIATED: {ticker} x{quantity} @ {simDate} strategy={strategyName}")
         # Validate strategyName is provided
         if not strategyName:
             print(f"ERROR: strategyName is required to place a long")
@@ -456,7 +432,7 @@ class StockExchange:
         '''
         # Get current price
         try:
-            price = float(self._getSafePrice(ticker, mic, simDate))
+            price = float(self.getPrice(ticker, mic, simDate))
         except ValueError as e:
             print(f"ERROR: {str(e)}")
             return -1
@@ -523,7 +499,6 @@ class StockExchange:
             
             return 0
         else:
-            print(f"[TRADE LOG] closeShort FAILED: No open short for {ticker}")
             print(f"ERROR: No open short found for {ticker} with sufficient quantity or already closed.")
             return -1
     
@@ -686,7 +661,7 @@ class StockExchange:
                 
                 # Get price at expiry date (not current date)
                 try:
-                    exitPrice = self._getSafePrice(ticker, mic, expiryDateStr)
+                    exitPrice = self.getPrice(ticker, mic, expiryDateStr)
                 except ValueError as e:
                     print(f"WARNING: {str(e)} - Skipping auto-close for {ticker}")
                     continue
@@ -738,7 +713,7 @@ class StockExchange:
                     quantity_float = float(quantity)
                     entryPrice_float = float(entryPrice)
                     
-                    current_price = self._getSafePrice(ticker, mic, currentDate)
+                    current_price = self.getPrice(ticker, mic, currentDate)
                     self.sellLong(accountId, ticker, mic, quantity_float, currentDate, strategyName, entryPrice_float, entryDate)
                     closed_count += 1
                     print(f"Closed open long: {ticker} {quantity_float} shares @ ${current_price:.2f}")
@@ -760,7 +735,7 @@ class StockExchange:
                     quantity_float = float(quantity)
                     priceAtShort_float = float(priceAtShort)
                     
-                    current_price = self._getSafePrice(ticker, mic, currentDate)
+                    current_price = self.getPrice(ticker, mic, currentDate)
                     self.closeShort(accountId, ticker, mic, quantity_float, currentDate, strategyName=strategyName, priceAtShort=priceAtShort_float, entryDate=entryDate)
                     closed_count += 1
                     print(f"Closed open short: {ticker} {quantity_float} shares @ ${current_price:.2f}")
@@ -836,10 +811,13 @@ class StockExchange:
     def getNewsForStock(self, ticker: str, mic: str, simDate: str) -> List[Dict[str, Any]]:
 
         '''
-        Retrieve raw news headlines for a stock on a given simulation date (data layer).
+        Retrieve news headlines for a stock on a given simulation date with on-demand sentiment computation.
         
-        Returns raw headline data without aggregation or intelligence processing.
-        Sentiment analysis is the responsibility of the agent/consumer.
+        Implements lazy-loading sentiment cache:
+        1. Query headlines from DB
+        2. For headlines with NULL sentiment: compute using FinBERT at runtime
+        3. Cache computed sentiments back to DB for next retrieval
+        4. Return headlines with sentiment/score populated
         
         Accounts for date imprecision in Kaggle dataset by querying headlines from simDate through simDate+1.
         
@@ -864,6 +842,9 @@ class StockExchange:
             Returns empty list [] if no headlines found.
         '''
         from datetime import datetime, timedelta
+        import logging
+        
+        logger = logging.getLogger(__name__)
         
         try:
             sim_date_obj = datetime.strptime(simDate, '%Y-%m-%d')
@@ -873,7 +854,8 @@ class StockExchange:
             print(f"ERROR: Invalid date format {simDate}. Expected YYYY-MM-DD.")
             return []
         
-        query = "SELECT headline, sentiment, sentiment_score, url, date, publisher " \
+        # Query with ID so we can update cached sentiments
+        query = "SELECT id, headline, sentiment, sentiment_score, url, date, publisher " \
                 "FROM news_headlines " \
                 "WHERE ticker = %s AND date >= %s AND date <= %s " \
                 "ORDER BY date ASC"
@@ -884,21 +866,89 @@ class StockExchange:
             rows = cursor.fetchall()
             
             headlines = []
+            headlines_needing_sentiment = []  # Track which headlines need on-demand computation
+            
             for row in rows:
-                headline, sentiment, score, url, date, publisher = row
-                headlines.append({
-                    'headline': headline,
-                    'sentiment': sentiment,
-                    'score': float(score),
-                    'url': url,
-                    'date': str(date),
-                    'publisher': publisher
-                })
+                headline_id, headline_text, sentiment, score, url, date, publisher = row
+                
+                # If sentiment is NULL, mark for on-demand computation
+                if sentiment is None:
+                    headlines_needing_sentiment.append({
+                        'id': headline_id,
+                        'headline': headline_text,
+                        'url': url,
+                        'date': date,
+                        'publisher': publisher,
+                        'needs_computation': True
+                    })
+                else:
+                    # Use cached sentiment
+                    headlines.append({
+                        'headline': headline_text,
+                        'sentiment': sentiment,
+                        'score': float(score) if score is not None else 0.0,
+                        'url': url,
+                        'date': str(date),
+                        'publisher': publisher
+                    })
+            
+            # Compute sentiments on-demand for any headlines missing them
+            if headlines_needing_sentiment:
+                logger.info(f"[NewsDB] Computing sentiment for {len(headlines_needing_sentiment)} headlines with NULL sentiment")
+                
+                # Lazy import to avoid circular dependency
+                try:
+                    from stockNews import NewsAnalyser
+                    analyser = NewsAnalyser()
+                    update_query = "UPDATE news_headlines SET sentiment = %s, sentiment_score = %s, confidence = %s WHERE id = %s"
+                    
+                    for headline_data in headlines_needing_sentiment:
+                        sentiment_result = analyser.getSentiment(headline_data['headline'])
+                        sentiment = sentiment_result['sentiment']
+                        score = sentiment_result['score']
+                        confidence = sentiment_result['confidence']
+                        
+                        # Cache to DB
+                        try:
+                            cursor.execute(update_query, (sentiment, score, confidence, headline_data['id']))
+                            self.connection.commit()
+                            logger.debug(f"[NewsDB] Cached sentiment for headline ID {headline_data['id']}: {sentiment} ({score:.3f})")
+                        except Exception as e:
+                            logger.warning(f"[NewsDB] Failed to cache sentiment for ID {headline_data['id']}: {e}")
+                        
+                        # Add to results
+                        headlines.append({
+                            'headline': headline_data['headline'],
+                            'sentiment': sentiment,
+                            'score': score,
+                            'url': headline_data['url'],
+                            'date': str(headline_data['date']),
+                            'publisher': headline_data['publisher']
+                        })
+                
+                except ImportError as e:
+                    logger.warning(f"[NewsDB] Could not import NewsAnalyser for on-demand computation: {e}")
+                    # Return headlines without sentiment if analyser unavailable
+                    for headline_data in headlines_needing_sentiment:
+                        headlines.append({
+                            'headline': headline_data['headline'],
+                            'sentiment': 'neutral',  # Fallback to neutral
+                            'score': 0.0,
+                            'url': headline_data['url'],
+                            'date': str(headline_data['date']),
+                            'publisher': headline_data['publisher']
+                        })
+            
+            # Log retrieval results
+            if headlines:
+                logger.info(f"[NewsDB] Retrieved {len(headlines)} headlines for {ticker} on {simDate}")
+                for i, h in enumerate(headlines[:2]):
+                    logger.debug(f"  {i+1}. [{h['sentiment']:8}] score={h['score']:6.3f} | {h['headline'][:70]}")
             
             return headlines
         
         except Exception as e:
-            print(f"ERROR querying news for {ticker}: {e}")
+            logger.error(f"ERROR querying news for {ticker}: {e}")
             return []
     
     def getMaxNewsDate(self) -> str:
@@ -987,12 +1037,12 @@ class StockExchange:
                     
                     if ticker and qty > 0:
                         try:
-                            current_price = self.getCurrentPrice(ticker, mic, simDate)
+                            current_price = self.getPrice(ticker, mic, simDate)
                             if trade_type == 'long':
                                 portfolio_value += current_price * qty
                             elif trade_type == 'short':
                                 portfolio_value -= current_price * qty
-                        except:
+                        except ValueError:
                             pass  # Skip if price fetch fails
             
             total_value = float(cash_balance) + portfolio_value

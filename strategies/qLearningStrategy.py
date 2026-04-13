@@ -19,7 +19,7 @@ from typing import Dict, List, Any, Optional, Tuple
 from collections import deque
 import random
 import logging
-from tradingStrategy import TradingStrategy
+from .tradingStrategy import TradingStrategy
 from datetime import datetime, timedelta
 
 logging.basicConfig(level=logging.INFO)

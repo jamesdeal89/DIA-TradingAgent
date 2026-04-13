@@ -33,6 +33,7 @@ Usage:
 import os
 import csv
 import json
+import argparse
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -140,7 +141,9 @@ class NewsAnalyser:
             elif label == 'negative':
                 score = -model_score
             else:  # neutral
-                score = 0.0
+                score = model_score * 0.1
+            
+            logger.debug(f"[FinBERT] {label:8} (raw={model_score:.4f}) score={score:.4f} | {headline[:60]}")
             
             return {
                 'sentiment': label,
@@ -155,88 +158,113 @@ class NewsAnalyser:
                 'confidence': 0.0
             }
     
-    def fineTune(self, headlines_df: Optional[pd.DataFrame] = None, num_samples: Optional[int] = None):
+    def fineTune(self, headlines_df: Optional[pd.DataFrame] = None, num_samples: Optional[int] = None, 
+                 batch_chunk_size: int = 50000, enable_fine_tuning: bool = False):
         """
-        Unsupervised fine-tune FinBERT on financial headlines from Kaggle dataset.
+        Batch-based fine-tuning of FinBERT on financial headlines.
         
-        If fine-tuned model already exists, skips fine-tuning and loads cached model.
+        Processes headlines in chunks to fit within GPU memory constraints.
+        Uses gradient accumulation and smaller per-device batch sizes for efficiency.
         
         Args:
-            headlines_df: DataFrame with 'headline' and 'label' columns. If None, loads from raw_partner_headlines.csv
-            num_samples: Max number of samples to fine-tune on (useful for testing). If None, uses all.
-        """
-        # Check if already fine-tuned
-        if os.path.exists(self.FINE_TUNED_PATH):
-            logger.info(f"Fine-tuned model already exists at {self.FINE_TUNED_PATH}. Skipping fine-tuning.")
-            return
+            headlines_df: Optional DataFrame with headlines. If None, loads from RAW_HEADLINES_FILE
+            num_samples: Limit to first N samples (optional)
+            batch_chunk_size: Number of headlines to process per batch (default 50k)
+            enable_fine_tuning: Set to True to actually fine-tune. Default False (use pre-trained)
         
-        # Load data if not provided
+        Returns:
+            True if fine-tuning completed, False if skipped
+        """
+        if not enable_fine_tuning:
+            logger.info("Fine-tuning DISABLED by default: Using pre-trained FinBERT (already trained on financial data)")
+            logger.info("To enable batched fine-tuning, call: analyser.fineTune(enable_fine_tuning=True)")
+            logger.info("This will process headlines in 50k batches with gradient accumulation")
+            return False
+        
+        # Load headlines
         if headlines_df is None:
             if not os.path.exists(self.RAW_HEADLINES_FILE):
-                logger.error(f"{self.RAW_HEADLINES_FILE} not found. Run download_and_extract_kaggle_data() first.")
-                return
-            
+                logger.error(f"{self.RAW_HEADLINES_FILE} not found")
+                return False
             logger.info(f"Loading headlines from {self.RAW_HEADLINES_FILE}")
             headlines_df = pd.read_csv(self.RAW_HEADLINES_FILE)
         
-        # Limit samples if specified (for testing)
         if num_samples is not None:
             headlines_df = headlines_df.head(num_samples)
         
-        logger.info(f"Fine-tuning on {len(headlines_df)} headlines...")
+        total_headlines = len(headlines_df)
+        logger.info(f"Fine-tuning on {total_headlines} headlines in batches of {batch_chunk_size}")
         
-        # Prepare data for fine-tuning (unsupervised MLM on headlines)
         try:
-            # Convert to HuggingFace Dataset
-            dataset = Dataset.from_pandas(headlines_df[['headline']].reset_index(drop=True))
-            
-            # Tokenize
-            def tokenize_function(examples):
-                return self.tokenizer(
-                    examples['headline'],
-                    padding='max_length',
-                    truncation=True,
-                    max_length=512
+            # Process in chunks
+            for chunk_idx, start_idx in enumerate(range(0, total_headlines, batch_chunk_size)):
+                end_idx = min(start_idx + batch_chunk_size, total_headlines)
+                chunk_df = headlines_df.iloc[start_idx:end_idx]
+                chunk_size = len(chunk_df)
+                
+                logger.info(f"\n[Batch {chunk_idx + 1}] Processing headlines {start_idx}-{end_idx} ({chunk_size} headlines)")
+                
+                # Convert to HuggingFace Dataset
+                dataset = Dataset.from_pandas(chunk_df[['headline']].reset_index(drop=True))
+                
+                # Tokenize
+                def tokenize_function(examples):
+                    return self.tokenizer(
+                        examples['headline'],
+                        padding='max_length',
+                        truncation=True,
+                        max_length=512
+                    )
+                
+                logger.info(f"  [1/3] Tokenizing batch {chunk_idx + 1}...")
+                tokenized_dataset = dataset.map(tokenize_function, batched=True, batch_size=1000)
+                
+                # Set up training arguments (smaller batch size, gradient accumulation)
+                training_args = TrainingArguments(
+                    output_dir=f"{self.FINE_TUNED_PATH}/checkpoint-batch-{chunk_idx}",
+                    num_train_epochs=1,  # One epoch per batch
+                    per_device_train_batch_size=8,  # Small per-device batch
+                    gradient_accumulation_steps=8,  # Effective batch = 8*8 = 64
+                    save_steps=500,
+                    save_total_limit=1,
+                    logging_steps=100,
+                    log_level='warning',
+                    use_cpu=False if torch.cuda.is_available() else True,
                 )
+                
+                # Train on this batch
+                logger.info(f"  [2/3] Training on batch {chunk_idx + 1}...")
+                trainer = Trainer(
+                    model=self.model,
+                    args=training_args,
+                    train_dataset=tokenized_dataset,
+                )
+                
+                trainer.train()
+                logger.info(f"  [3/3] Batch {chunk_idx + 1} complete")
             
-            tokenized_dataset = dataset.map(tokenize_function, batched=True)
-            
-            # Set up training arguments
-            training_args = TrainingArguments(
-                output_dir=self.FINE_TUNED_PATH,
-                num_train_epochs=self.num_epochs,
-                per_device_train_batch_size=self.batch_size,
-                save_steps=100,
-                save_total_limit=2,
-                logging_steps=50,
-            )
-            
-            # Train
-            trainer = Trainer(
-                model=self.model,
-                args=training_args,
-                train_dataset=tokenized_dataset,
-            )
-            
-            logger.info(f"Starting fine-tuning for {self.num_epochs} epochs with batch size {self.batch_size}")
-            trainer.train()
-            
-            # Save fine-tuned model
+            # Save final fine-tuned model
             os.makedirs(self.FINE_TUNED_PATH, exist_ok=True)
+            logger.info(f"\nSaving fine-tuned model to {self.FINE_TUNED_PATH}")
             self.model.save_pretrained(self.FINE_TUNED_PATH)
             self.tokenizer.save_pretrained(self.FINE_TUNED_PATH)
-            logger.info(f"Fine-tuned model saved to {self.FINE_TUNED_PATH}")
+            logger.info("Fine-tuning completed successfully!")
+            return True
             
         except Exception as e:
             logger.error(f"Error during fine-tuning: {e}")
-            logger.info("Continuing with pre-trained model...")
+            logger.info("Continuing with current model state...")
+            return False
     
-    def generateSentimentCache(self, force: bool = False) -> bool:
+    def generateSentimentCache(self, force: bool = False, batch_size: int = 64) -> bool:
         """
         Generate sentiments.csv cache by classifying all headlines in raw_partner_headlines.csv.
+        Uses direct model inference with GPU batching for efficiency.
+        Automatically reduces batch size if OOM occurs.
         
         Args:
             force: If True, regenerate even if cache exists
+            batch_size: Number of headlines to process in each GPU batch (default 64, reduced for low-VRAM GPUs)
             
         Returns:
             True if cache was generated, False otherwise
@@ -252,32 +280,95 @@ class NewsAnalyser:
             return False
         
         logger.info(f"Generating sentiment cache from {self.RAW_HEADLINES_FILE}")
+        logger.info(f"Using direct model inference with batch_size={batch_size}")
         
         # Load raw headlines
         headlines_df = pd.read_csv(self.RAW_HEADLINES_FILE)
-        logger.info(f"Loaded {len(headlines_df)} headlines")
+        total_headlines = len(headlines_df)
+        logger.info(f"Loaded {total_headlines} headlines")
         
-        # Classify each headline
+        # Classify using direct model inference with adaptive batch sizing
         sentiments = []
-        for idx, row in headlines_df.iterrows():
-            headline = row['headline']
-            sentiment_result = self.getSentiment(headline)
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        current_batch_size = batch_size
+        
+        batch_start = 0
+        while batch_start < total_headlines:
+            batch_end = min(batch_start + current_batch_size, total_headlines)
+            batch_df = headlines_df.iloc[batch_start:batch_end]
             
-            sentiments.append({
-                'index': row['index'],
-                'sentiment': sentiment_result['sentiment'],
-                'score': round(sentiment_result['score'], 4),
-                'confidence': round(sentiment_result['confidence'], 4)
-            })
+            # Get headlines and indices for this batch
+            headlines_batch = batch_df['headline'].tolist()
+            indices_batch = batch_df['index'].tolist()
             
-            # Progress logging
-            if (idx + 1) % 100 == 0:
-                logger.info(f"Processed {idx + 1}/{len(headlines_df)} headlines")
+            try:
+                # Tokenize batch
+                inputs = self.tokenizer(
+                    headlines_batch,
+                    padding=True,
+                    truncation=True,
+                    max_length=512,
+                    return_tensors='pt'
+                ).to(device)
+                
+                # Inference with no gradients
+                with torch.no_grad():
+                    outputs = self.model(**inputs)
+                
+                # Parse logits to sentiments
+                logits = outputs.logits
+                probabilities = torch.nn.functional.softmax(logits, dim=-1)
+                predicted_labels = torch.argmax(logits, dim=-1)
+                predicted_scores = torch.max(probabilities, dim=-1).values
+                
+                # Convert to results
+                label_map = {0: 'negative', 1: 'neutral', 2: 'positive'}
+                
+                for idx, headline_text, label_idx, score in zip(
+                    indices_batch, headlines_batch, predicted_labels.cpu().tolist(), predicted_scores.cpu().tolist()
+                ):
+                    label = label_map.get(label_idx, 'neutral')
+                    
+                    # Normalize score based on sentiment
+                    if label == 'positive':
+                        final_score = score
+                    elif label == 'negative':
+                        final_score = -score
+                    else:  # neutral
+                        final_score = score * 0.1  # Scale by confidence
+                    
+                    sentiments.append({
+                        'index': idx,
+                        'sentiment': label,
+                        'score': round(float(final_score), 4),
+                        'confidence': round(float(score), 4)
+                    })
+                
+                # Clear GPU cache after successful batch
+                if device.type == 'cuda':
+                    torch.cuda.empty_cache()
+                
+                # Progress logging
+                percent_done = 100 * batch_end / total_headlines
+                logger.info(f"Processed {batch_end}/{total_headlines} headlines ({percent_done:.1f}%)")
+                
+                batch_start = batch_end
+                
+            except torch.cuda.OutOfMemoryError:
+                # Reduce batch size and retry
+                if current_batch_size > 1:
+                    current_batch_size = max(1, current_batch_size // 2)
+                    logger.warning(f"GPU OOM: reducing batch_size to {current_batch_size}, retrying...")
+                    torch.cuda.empty_cache()
+                else:
+                    logger.error("Batch size is 1 but still OOM. This shouldn't happen.")
+                    return False
         
         # Write cache
         sentiments_df = pd.DataFrame(sentiments)
         sentiments_df.to_csv(self.SENTIMENTS_CACHE, index=False)
         logger.info(f"Sentiment cache saved to {self.SENTIMENTS_CACHE}")
+        logger.info(f"Total: {len(sentiments_df)} sentiments classified")
         
         return True
     
@@ -328,7 +419,7 @@ def download_and_extract_kaggle_data() -> bool:
                 
                 # Look for common headline/news columns
                 headline_cols = [col for col in df.columns if 'headline' in col.lower() or 'title' in col.lower() or 'news' in col.lower()]
-                ticker_cols = [col for col in df.columns if 'ticker' in col.lower() or 'symbol' in col.lower()]
+                ticker_cols = [col for col in df.columns if 'ticker' in col.lower() or 'symbol' in col.lower() or 'stock' in col.lower()]
                 date_cols = [col for col in df.columns if 'date' in col.lower()]
                 url_cols = [col for col in df.columns if 'url' in col.lower() or 'link' in col.lower()]
                 
@@ -382,46 +473,35 @@ def download_and_extract_kaggle_data() -> bool:
         return False
 
 
-def initialiseNewsDatabase(stockExchange, newsAnalyser: NewsAnalyser) -> bool:
+def initialiseNewsDatabase(stockExchange, newsAnalyser: NewsAnalyser, compute_sentiments: bool = False) -> bool:
     """
-    Populate MySQL news_headlines table with extracted headlines and sentiment scores.
+    Populate MySQL news_headlines table with extracted headlines.
     
     Args:
         stockExchange: StockExchange instance with MySQL connection
-        news_analyser: NewsAnalyser instance with sentiment cache
+        newsAnalyser: NewsAnalyser instance for sentiment computation
+        compute_sentiments: If True, compute and store sentiments. If False, store NULL (default).
+                           Sentiments will be computed on-demand during runtime.
         
     Returns:
         True if successful, False otherwise
     """
-    # Check if raw headlines and sentiments exist
+    # Check if raw headlines exist
     if not os.path.exists(NewsAnalyser.RAW_HEADLINES_FILE):
         logger.error(f"{NewsAnalyser.RAW_HEADLINES_FILE} not found. Run download_and_extract_kaggle_data() first.")
         return False
     
-    if not os.path.exists(NewsAnalyser.SENTIMENTS_CACHE):
-        logger.error(f"{NewsAnalyser.SENTIMENTS_CACHE} not found. Run news_analyser.generateSentimentCache() first.")
-        return False
-    
-    # Load data
+    # Load raw headlines
     headlines_df = pd.read_csv(NewsAnalyser.RAW_HEADLINES_FILE)
-    sentiments_df = pd.read_csv(NewsAnalyser.SENTIMENTS_CACHE)
-    
-    # Merge on index
-    merged_df = headlines_df.merge(sentiments_df, on='index', how='inner')
-    
-    if len(merged_df) == 0:
-        logger.error("No matching headlines and sentiments found")
-        return False
-    
-    logger.info(f"Populating MySQL with {len(merged_df)} headlines...")
+    logger.info(f"Populating MySQL with {len(headlines_df)} raw headlines...")
     
     # Insert into database
     cursor = stockExchange.connection.cursor()
     
     insert_query = """
         INSERT INTO news_headlines 
-        (ticker, headline, url, publisher, date, sentiment, sentiment_score, confidence)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        (id, ticker, headline, url, publisher, date, sentiment, sentiment_score, confidence)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON DUPLICATE KEY UPDATE 
         sentiment = VALUES(sentiment), 
         sentiment_score = VALUES(sentiment_score),
@@ -429,23 +509,35 @@ def initialiseNewsDatabase(stockExchange, newsAnalyser: NewsAnalyser) -> bool:
     """
     
     inserted = 0
-    for idx, row in merged_df.iterrows():
+    for idx, row in headlines_df.iterrows():
         try:
+            # If compute_sentiments=True, get sentiment now; otherwise use NULL
+            if compute_sentiments:
+                sentiment_result = newsAnalyser.getSentiment(row['headline'])
+                sentiment = sentiment_result['sentiment']
+                score = sentiment_result['score']
+                confidence = sentiment_result['confidence']
+            else:
+                sentiment = None
+                score = None
+                confidence = None
+            
             cursor.execute(insert_query, (
+                int(row['index']),  # Use 'index' column from CSV as id
                 row['stock_ticker'],
                 row['headline'],
                 row['URL'],
                 row['publisher'],
                 row['date'],
-                row['sentiment'],
-                float(row['score']),
-                float(row['confidence'])
+                sentiment,
+                score,
+                confidence
             ))
             inserted += 1
             
-            if (idx + 1) % 500 == 0:
+            if (idx + 1) % 5000 == 0:
                 stockExchange.connection.commit()
-                logger.info(f"Inserted {inserted}/{len(merged_df)} records")
+                logger.info(f"Inserted {inserted}/{len(headlines_df)} records ({100*inserted/len(headlines_df):.1f}%)")
         
         except Exception as e:
             logger.error(f"Error inserting record {idx}: {e}")
@@ -456,14 +548,43 @@ def initialiseNewsDatabase(stockExchange, newsAnalyser: NewsAnalyser) -> bool:
     cursor.close()
     logger.info(f"Successfully populated news_headlines with {inserted} records")
     
+    if not compute_sentiments:
+        logger.info("Sentiments are NULL - they will be computed on-demand when agent queries headlines")
+    
     return True
 
 
 if __name__ == "__main__":
     """
     Main execution block: Download data, fine-tune model, generate cache, and populate database.
+    
+    Usage:
+        python3 stockNews.py              # Default: no fine-tuning, use pre-trained FinBERT
+        python3 stockNews.py --finetune   # Enable batched fine-tuning on 4.65M headlines
     """
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(
+        description="Stock news sentiment analysis pipeline",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python3 stockNews.py              # Use pre-trained FinBERT (fast, ~30-60 min)
+  python3 stockNews.py --finetune   # Fine-tune on data (slower, ~2-3 hours)
+        """
+    )
+    parser.add_argument(
+        '--finetune',
+        action='store_true',
+        help='Enable batched fine-tuning on 4.65M headlines (slower but potentially better accuracy)'
+    )
+    args = parser.parse_args()
+    
     logger.info("Starting stock news sentiment analysis pipeline...")
+    if args.finetune:
+        logger.info("Mode: FINE-TUNING ENABLED (batched processing, ~2-3 hours)")
+    else:
+        logger.info("Mode: PRE-TRAINED MODEL (fast, ~30-60 minutes)")
+        logger.info("       Use --finetune flag to enable fine-tuning for comparison")
     
     # Step 1: Download and extract Kaggle data
     logger.info("\n=== STEP 1: Download and Extract Kaggle Data ===")
@@ -474,22 +595,21 @@ if __name__ == "__main__":
     # Step 2: Initialise NewsAnalyser and fine-tune (or load cached)
     logger.info("\n=== STEP 2: Fine-tune FinBERT ===")
     analyser = NewsAnalyser(batch_size=16, num_epochs=3)
-    analyser.fineTune()
+    analyser.fineTune(enable_fine_tuning=args.finetune)
     
-    # Step 3: Generate sentiment cache
-    logger.info("\n=== STEP 3: Generate Sentiment Cache ===")
-    if analyser.generateSentimentCache():
-        logger.info("Sentiment cache generated successfully")
-    else:
-        logger.info("Sentiment cache already exists or error occurred")
+    # Step 3: SKIP sentiment cache generation - compute on-demand instead
+    logger.info("\n=== STEP 3: Skip Sentiment Pre-computation ===")
+    logger.info("Sentiments will be computed on-demand during runtime")
+    logger.info("This is faster for typical trading simulations that use <1% of headlines")
     
-    # Step 4: Populate MySQL (requires StockExchange instance)
-    logger.info("\n=== STEP 4: Populate MySQL news_headlines Table ===")
+    # Step 4: Populate MySQL with raw headlines only (no sentiment yet)
+    logger.info("\n=== STEP 4: Populate MySQL with Raw Headlines ===")
     try:
         from stockExchange import StockExchange
         exchange = StockExchange()
-        if initialiseNewsDatabase(exchange, analyser):
-            logger.info("MySQL database populated successfully")
+        if initialiseNewsDatabase(exchange, analyser, compute_sentiments=False):
+            logger.info("MySQL database populated successfully with raw headlines")
+            logger.info("Sentiments will be computed on-demand when agent queries headlines")
         else:
             logger.error("Failed to populate MySQL database")
     except Exception as e:

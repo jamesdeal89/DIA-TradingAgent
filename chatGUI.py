@@ -631,8 +631,8 @@ def chatGUI():
                                         qty = row.get('quantity', 0)
                                         # Get current price
                                         try:
-                                            current_price = exchange.getCurrentPrice(ticker, mic, agent.simDate)
-                                        except:
+                                            current_price = exchange.getPrice(ticker, mic, agent.simDate)
+                                        except ValueError:
                                             current_price = entry_price  # Fall back to entry price if error
                                         portfolioDict[ticker]['long'] = qty
                                         portfolioDict[ticker]['longEntryPrice'] = entry_price
@@ -642,8 +642,8 @@ def chatGUI():
                                         qty = row.get('quantity', 0)
                                         # Get current price
                                         try:
-                                            current_price = exchange.getCurrentPrice(ticker, mic, agent.simDate)
-                                        except:
+                                            current_price = exchange.getPrice(ticker, mic, agent.simDate)
+                                        except ValueError:
                                             current_price = entry_price  # Fall back to entry price if error
                                         portfolioDict[ticker]['short'] = qty
                                         portfolioDict[ticker]['shortEntryPrice'] = entry_price

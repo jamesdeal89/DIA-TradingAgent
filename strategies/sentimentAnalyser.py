@@ -5,11 +5,14 @@ This module provides sentiment analysis functions for agents to apply
 to raw headline data returned by StockExchange.getNewsForStock().
 
 Separates concerns:
-- StockExchange: Data access layer (returns raw headlines)
-- Agent: Intelligence layer (applies sentiment analysis logic)
+- StockExchange: Data layer (queries headlines, handles on-demand FinBERT computation & caching)
+- SentimentAnalyser: Utility layer (aggregates pre-computed sentiment scores into metrics)
+- Agent: Intelligence layer (applies aggregated metrics to make trading decisions)
 
 Usage:
     headlines = exchange.getNewsForStock('AAPL', 'XNAS', '2015-01-15')
+    # Note: headlines may have been computed on-demand via FinBERT and cached to DB
+    
     metrics = analyseSentiment(headlines)
     
     if metrics['avgSentiment'] > 0.5:

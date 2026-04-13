@@ -2,15 +2,14 @@
 Stock Trading Intelligent Agent with Hyper-Heuristic Delegator.
 
 Multi-strategy agent that selects trading approaches based on past performance (profit factor).
-Strategies include: Sentiment Analysis, Mean Reversion, Technical Indicators, Fundamental Analysis.
+Strategies include: Sentiment Analysis, Mean Reversion, Technical Indicators, Fundamental Analysis, an LSTM, and an RL Deep Q-Network.
 
 Each agent runs in a separate thread and has:
-- Per-agent isolated performance tracking (thread-safe)
-- Epsilon-greedy strategy selection
-- Query interface for GUI integration
-- Lifecycle controls (pause/resume/stop)
+- Per-agent performance tracking.
+- Epsilon-greedy strategy selection.
+- Query interface for GUI integration.
 
-Shared market: All agents trade on single StockExchange/MySQL instance (concurrent writes serialized).
+Shared market: All agents trade on single StockExchange/MySQL instance, but have a unique ID to separate their portfolios.
 '''
 
 from abc import ABC, abstractmethod
@@ -20,871 +19,35 @@ import time
 import logging
 import numpy as np
 from datetime import datetime, timedelta
-from tradingStrategy import TradingStrategy
-from qLearningStrategy import DeepQLearningStrategy
-from lstmStrategy import LSTMStrategy
+from strategies import (
+    TradingStrategy,
+    DeepQLearningStrategy,
+    LSTMStrategy,
+    SentimentStrategy,
+    MeanReversionStrategy,
+    TechnicalStrategy,
+    FundamentalStrategy,
+    StateBuilder
+)
+from performanceTracker import PerformanceTracker
+from strategySelector import StrategySelector
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
-# CONCRETE STRATEGY: SENTIMENT ANALYSIS
-
-class SentimentStrategy(TradingStrategy):
-    """
-    Analyses news sentiment to make trading decisions.
-    Positive sentiment -> long, Negative sentiment -> short, Neutral -> hold.
-    Aggregates sentiment over the analysis period for more robust signals.
-    """
-    
-    def __init__(self):
-        super().__init__(name="Sentiment", version="1.0")
-    
-    def analyse(self, ticker: str, mic: str, simDate: str, exchange, analysisPeriod: int = 1) -> Dict[str, Any]:
-        """
-        Analyse news sentiment for the ticker over analysisPeriod days.
-        
-        Args:
-            analysisPeriod: Number of days to aggregate sentiment over
-        
-        Returns:
-            - LONG if average sentiment is positive (score > 0.2)
-            - SHORT if average sentiment is negative (score < -0.2)
-            - HOLD if neutral
-        """
-        try:
-            from datetime import datetime, timedelta
-            
-            # Gather sentiment data over the analysis period
-            all_scores = []
-            headline_count = 0
-            
-            for day_offset in range(analysisPeriod):
-                current_date = (datetime.strptime(simDate, '%Y-%m-%d') - timedelta(days=day_offset)).strftime('%Y-%m-%d')
-                headlines = exchange.getNewsForStock(ticker, mic, current_date)
-                if headlines:
-                    scores = [h.get('score', 0.0) for h in headlines]
-                    all_scores.extend(scores)
-                    headline_count += len(headlines)
-            
-            if not all_scores:
-                return {
-                    'action': 'hold',
-                    'confidence': 0.3,
-                    'reason': f'No news data available over {analysisPeriod} days',
-                    'targetQuantity': 0
-                }
-            
-            # Calculate average sentiment score across all collected headlines
-            avg_score = sum(all_scores) / len(all_scores) if all_scores else 0.0
-            
-            # Determine action based on sentiment (threshold 0.01 - very sensitive to any sentiment)
-            if avg_score > 0.01:
-                return {
-                    'action': 'long',
-                    'confidence': min(0.95, abs(avg_score) * 2),  # Scale confidence with lower threshold
-                    'reason': f'Positive sentiment ({avg_score:.2f}) from {headline_count} headlines over {analysisPeriod} days',
-                    'targetQuantity': 1
-                }
-            elif avg_score < -0.01:
-                # Recommend selling longs if sentiment is negative (agent checks portfolio)
-                return {
-                    'action': 'sell',
-                    'confidence': min(0.95, abs(avg_score) * 2),  # Scale confidence with lower threshold
-                    'reason': f'Negative sentiment ({avg_score:.2f}) - exit long positions',
-                    'targetQuantity': 0
-                }
-            else:
-                return {
-                    'action': 'hold',
-                    'confidence': 0.5,
-                    'reason': f'Neutral sentiment ({avg_score:.2f}) from {headline_count} headlines over {analysisPeriod} days',
-                    'targetQuantity': 0
-                }
-        
-        except Exception as e:
-            logger.warning(f"SentimentStrategy.analyse() failed: {e}")
-            return {
-                'action': 'hold',
-                'confidence': 0.0,
-                'reason': f'Error: {str(e)}',
-                'targetQuantity': 0
-            }
-
-
-# CONCRETE STRATEGY: MEAN REVERSION
-
-class MeanReversionStrategy(TradingStrategy):
-    """
-    Trades based on price deviation from mean.
-    Dynamically scales lookback window based on analysisPeriod.
-    If price < mean - 2*std LONG (buy the dip)
-    If price > mean + 2*std SHORT (sell the peak)
-    """
-    
-    def __init__(self):
-        super().__init__(name="MeanReversion", version="1.0")
-    
-    def analyse(self, ticker: str, mic: str, simDate: str, exchange, analysisPeriod: int = 1) -> Dict[str, Any]:
-        """
-        Calculate if stock is above/below mean over analysisPeriod.
-        
-        Args:
-            analysisPeriod: Window size for calculating mean and std (default 20, scales up with decision period)
-        """
-        try:
-            # Scale lookback window based on analysis period
-            lookback_window = max(20, analysisPeriod)
-            required_history = lookback_window + 5  # Get extra data for safety
-            
-            # Get historical data leading up to simDate
-            suffixedTicker = exchange.getMicTicker(ticker, mic)
-            data = exchange.getStockData(suffixedTicker, start=None, end=simDate)
-            
-            if data is None or len(data) < lookback_window:
-                return {
-                    'action': 'hold',
-                    'confidence': 0.2,
-                    'reason': f'Insufficient historical data (< {lookback_window} days)',
-                    'targetQuantity': 0
-                }
-            
-            # Calculate moving average and std deviation over the scaled window
-            close_prices = data['Close'].tail(lookback_window)
-            mean_price = close_prices.mean()
-            std_price = close_prices.std()
-            current_price = close_prices.iloc[-1]
-            
-            # Calculate z-score (how many std devs away from mean)
-            z_score = (current_price - mean_price) / std_price if std_price > 0 else 0
-            
-            # Trading logic (threshold 0.3 generates signals ~24% of time - more aggressive)
-            threshold = 0.3
-            
-            if z_score < -threshold:  # Price is threshold+ std devs below mean
-                return {
-                    'action': 'long',
-                    'confidence': min(0.9, 0.5 + abs(z_score) * 0.15),
-                    'reason': f'Price {current_price:.2f} is {abs(z_score):.2f}sd below {lookback_window}d mean {mean_price:.2f}',
-                    'targetQuantity': 1
-                }
-            elif z_score > threshold:  # Price is threshold+ std devs above mean
-                # Recommend selling (agent will check portfolio before executing)
-                return {
-                    'action': 'sell',
-                    'confidence': min(0.9, 0.5 + abs(z_score) * 0.15),
-                    'reason': f'Price {current_price:.2f} ({abs(z_score):.2f}sd above mean) - exit signal',
-                    'targetQuantity': 0
-                }
-            else:
-                return {
-                    'action': 'hold',
-                    'confidence': 0.4,
-                    'reason': f'Price within normal range (z={z_score:.2f}) over {lookback_window}d',
-                    'targetQuantity': 0
-                }
-        
-        except Exception as e:
-            logger.warning(f"MeanReversionStrategy.analyse() failed: {e}")
-            return {
-                'action': 'hold',
-                'confidence': 0.0,
-                'reason': f'Error: {str(e)}',
-                'targetQuantity': 0
-            }
-
-
-# CONCRETE STRATEGY: TECHNICAL INDICATORS
-
-class TechnicalStrategy(TradingStrategy):
-    """
-    Uses technical indicators: RSI, MACD, Bollinger Bands.
-    - RSI > 70: overbought (SHORT signal)
-    - RSI < 30: oversold (LONG signal)
-    - MACD crossover: trend change signal
-    """
-    
-    def __init__(self):
-        super().__init__(name="Technical", version="1.0")
-    
-    def analyse(self, ticker: str, mic: str, simDate: str, exchange, analysisPeriod: int = 1) -> Dict[str, Any]:
-        """
-        Calculate RSI and MACD indicators over the analysis period.
-        Scales indicator periods with analysis period for larger windows.
-        """
-        try:
-            # Scale indicator periods based on analysis window
-            rsi_period = max(14, analysisPeriod // 2)
-            required_data = max(50, analysisPeriod * 2)
-            
-            # Get historical data for indicator calculation
-            suffixedTicker = exchange.getMicTicker(ticker, mic)
-            data = exchange.getStockData(suffixedTicker, start=None, end=simDate)
-            
-            if data is None or len(data) < rsi_period:
-                return {
-                    'action': 'hold',
-                    'confidence': 0.2,
-                    'reason': f'Insufficient data for technical analysis (< {rsi_period} days)',
-                    'targetQuantity': 0
-                }
-            
-            # Calculate RSI with scaled period
-            rsi = self._calculateRsi(data['Close'], period=rsi_period)
-            
-            # Calculate MACD
-            macd, signal = self._calculateMacd(data['Close'])
-            
-            # Determine action based on indicators
-            confidence = 0.0
-            reason = ""
-            action = 'hold'
-            
-            # RSI signals (strongest signal) - be more selective to reduce dominance
-            if rsi is not None:
-                if rsi > 75:  # Raised to 75 - only extreme overbought
-                    action = 'short'
-                    confidence = max(confidence, (rsi - 75) / 25)  # 0.0-1.0
-                    reason = f"RSI {rsi:.1f} overbought"
-                elif rsi < 25:  # Raised to 25 - only extreme oversold
-                    action = 'long'
-                    confidence = max(confidence, (25 - rsi) / 25)  # 0.0-1.0
-                    reason = f"RSI {rsi:.1f} oversold"
-                else:
-                    # Neutral RSI: provide confidence based on proximity to extremes
-                    if rsi > 60:
-                        confidence = 0.2  # Approaching overbought
-                    elif rsi < 40:
-                        confidence = 0.2  # Approaching oversold
-                    else:
-                        confidence = 0.1  # Mid-range, low conviction
-            else:
-                # RSI calculation failed, use minimal confidence
-                confidence = 0.15
-            
-            # MACD confirmation (use if RSI is hold)
-            if action == 'hold' and macd is not None and signal is not None:
-                if macd > signal:
-                    action = 'long'
-                    confidence = max(confidence, 0.6)
-                    reason = "MACD bullish crossover" if reason == "" else reason
-                elif macd < signal:
-                    action = 'short'
-                    confidence = max(confidence, 0.6)
-                    reason = "MACD bearish crossover" if reason == "" else reason
-            
-            # If overbought, recommend selling (agent will check portfolio before executing)
-            if rsi is not None and rsi > 75:
-                action = 'sell'
-                confidence = max(confidence, (rsi - 75) / 25)
-                reason = f"Selling overbought RSI position ({rsi:.1f})"
-            
-            return {
-                'action': action,
-                'confidence': confidence,
-                'reason': reason or 'No technical signal',
-                'targetQuantity': 0 if action == 'sell' else (1 if action != 'hold' else 0)
-            }
-        
-        except Exception as e:
-            logger.warning(f"TechnicalStrategy.analyse() failed: {e}")
-            return {
-                'action': 'hold',
-                'confidence': 0.0,
-                'reason': f'Error: {str(e)}',
-                'targetQuantity': 0
-            }
-    
-    def _calculateRsi(self, prices, period: int = 14) -> Optional[float]:
-        """Calculate RSI indicator."""
-        try:
-            deltas = prices.diff()
-            seed = deltas[:period+1]
-            up = seed[seed >= 0].sum() / period
-            down = -seed[seed < 0].sum() / period
-            rs = up / down if down != 0 else 0
-            rsi_values = [100.0 - 100.0 / (1.0 + rs)] * period
-            
-            for i in range(period, len(deltas)):
-                delta = deltas.iloc[i]
-                if delta > 0:
-                    up = (up * (period - 1) + delta) / period
-                    down = (down * (period - 1)) / period
-                else:
-                    up = (up * (period - 1)) / period
-                    down = (down * (period - 1) - delta) / period
-                
-                rs = up / down if down != 0 else 0
-                rsi_values.append(100.0 - 100.0 / (1.0 + rs))
-            
-            return rsi_values[-1] if rsi_values else None
-        except:
-            return None
-    
-    def _calculateMacd(self, prices, fast: int = 12, slow: int = 26, signal: int = 9):
-        """Calculate MACD indicator."""
-        try:
-            ema_fast = prices.ewm(span=fast).mean().iloc[-1]
-            ema_slow = prices.ewm(span=slow).mean().iloc[-1]
-            macd_line = ema_fast - ema_slow
-            
-            # Simplified signal line (using last 9 MACD values)
-            macd_values = (prices.ewm(span=fast).mean() - prices.ewm(span=slow).mean()).tail(signal)
-            signal_line = macd_values.mean()
-            
-            return macd_line, signal_line
-        except:
-            return None, None
-
-
-# CONCRETE STRATEGY: FUNDAMENTAL ANALYSIS
-
-class FundamentalStrategy(TradingStrategy):
-    """
-    Uses basic price-based statistics.
-    """
-    
-    def __init__(self):
-        super().__init__(name="Fundamental", version="1.0")
-    
-    def analyse(self, ticker: str, mic: str, simDate: str, exchange, analysisPeriod: int = 1) -> Dict[str, Any]:
-        """
-        Placeholder fundamental analysis scaled by analysis period.
-        Uses price volatility and momentum over the analysis window as proxy for fundamental strength.
-        """
-        try:
-            # Scale lookback window based on analysis period
-            lookback_window = max(30, analysisPeriod)
-            
-            # Get historical data
-            suffixedTicker = exchange.getMicTicker(ticker, mic)
-            data = exchange.getStockData(suffixedTicker, start=None, end=simDate)
-            
-            if data is None or len(data) < lookback_window:
-                return {
-                    'action': 'hold',
-                    'confidence': 0.3,
-                    'reason': f'Insufficient data for fundamental analysis (< {lookback_window} days)',
-                    'targetQuantity': 0
-                }
-            
-            # Calculate volatility (proxy for risk/strength) over the window
-            returns = data['Close'].pct_change()
-            volatility = returns.std()
-            
-            # Calculate price momentum over the analysis period
-            price_ago = data['Close'].iloc[-lookback_window]
-            price_today = data['Close'].iloc[-1]
-            momentum = (price_today - price_ago) / price_ago
-            
-            # Decision logic: threshold 0.005 (very sensitive) and volatility tolerance for more trades
-            if momentum > 0.005 and volatility < 0.15:
-                return {
-                    'action': 'long',
-                    'confidence': min(0.8, 0.4 + momentum),
-                    'reason': f'Positive momentum ({momentum*100:.1f}%) over {lookback_window}d',
-                    'targetQuantity': 1
-                }
-            elif momentum < -0.005 and volatility < 0.15:
-                # Weak momentum = recommend selling longs (agent checks portfolio)
-                return {
-                    'action': 'sell',
-                    'confidence': min(0.8, 0.4 + abs(momentum)),
-                    'reason': f'Weak momentum ({momentum*100:.1f}%) - exit long positions',
-                    'targetQuantity': 0
-                }
-            else:
-                return {
-                    'action': 'hold',
-                    'confidence': 0.5,
-                    'reason': f'Momentum neutral ({momentum*100:.1f}%), high volatility ({volatility*100:.1f}%)',
-                    'targetQuantity': 0
-                }
-        
-        except Exception as e:
-            logger.warning(f"FundamentalStrategy.analyse() failed: {e}")
-            return {
-                'action': 'hold',
-                'confidence': 0.0,
-                'reason': f'Error: {str(e)}',
-                'targetQuantity': 0
-            }
-
-
-# PERFORMANCE TRACKER
-
-class PerformanceTracker:
-    """
-    Tracks strategy performance using profit factor (sum of profits / sum of losses).
-    Thread-safe: uses RLock() to prevent read/write conflicts when GUI queries while agent records trades.
-    """
-    
-    def __init__(self, windowSize: int = 50):
-        """
-        Initialise performance tracker.
-        
-        Args:
-            windowSize: Number of recent trades to consider for sliding window metrics (default: 50)
-        """
-        self._lock = threading.RLock()
-        self.windowSize = windowSize
-        
-        # Per-strategy tracking
-        # strategyName -> list of trades (executed trades only)
-        self._tradeHistory: Dict[str, List[Dict]] = {}  
-        # strategyName -> cached metrics for trades
-        self._metricsCache: Dict[str, Dict] = {}
-        # strategyName -> list of all recommendations (including HOLDs)
-        self._recommendationHistory: Dict[str, List[Dict]] = {}  
-    
-    def recordTrade(self, strategyName: str, entryPrice: float, exitPrice: float, 
-                   quantity: int, ticker: str, entryDate: str, exitDate: str, tradeType: str = 'long') -> None:
-        """
-        Record a closed trade for a strategy.
-        
-        Args:
-            strategyName: Name of strategy that initiated this trade
-            entryPrice: Price at trade entry
-            exitPrice: Price at trade exit
-            quantity: Number of shares traded
-            ticker: Stock ticker
-            entryDate: Trade entry date (YYYY-MM-DD)
-            exitDate: Trade exit date (YYYY-MM-DD)
-            tradeType: 'long' or 'short' for correct P&L calculation
-        """
-        with self._lock:
-            if strategyName not in self._tradeHistory:
-                self._tradeHistory[strategyName] = []
-            
-            # Calculate P&L correctly based on trade type
-            if tradeType == 'short':
-                pnl = (entryPrice - exitPrice) * quantity
-            else:  # default to long
-                pnl = (exitPrice - entryPrice) * quantity
-            
-            # Deduplication: check if this EXACT trade was just recorded (same entry date, exit date, prices)
-            # Include entryDate to distinguish trades on same ticker with similar prices
-            trade_sig_tuple = (ticker, quantity, round(entryPrice, 4), round(exitPrice, 4), round(pnl, 4), entryDate)
-            recent_trades = self._tradeHistory[strategyName][-3:] if len(self._tradeHistory[strategyName]) > 0 else []
-            for recent_trade in recent_trades:
-                recent_sig = (recent_trade['ticker'], recent_trade['quantity'],
-                             round(recent_trade['entryPrice'], 4), round(recent_trade['exitPrice'], 4),
-                             round(recent_trade['pnl'], 4), recent_trade['entryDate'])
-                if trade_sig_tuple == recent_sig:
-                    logger.warning(f"[{strategyName}] DUPLICATE TRADE REJECTED: {ticker} {quantity}@{entryPrice:.2f}->{exitPrice:.2f} on {entryDate} P&L=${pnl:.2f}")
-                    return
-            
-            trade = {
-                'ticker': ticker,
-                'entryPrice': entryPrice,
-                'exitPrice': exitPrice,
-                'quantity': quantity,
-                'pnl': pnl,
-                'entryDate': entryDate,
-                'exitDate': exitDate,
-                'returnPct': ((exitPrice - entryPrice) / entryPrice * 100) if entryPrice != 0 else 0
-            }
-            self._tradeHistory[strategyName].append(trade)
-            
-            # Invalidate cache so next query recalculates
-            if strategyName in self._metricsCache:
-                del self._metricsCache[strategyName]
-            
-            # Log with detailed breakdown
-            allTradesCount = len(self._tradeHistory[strategyName])
-            allTradesPnL = sum(t['pnl'] for t in self._tradeHistory[strategyName])
-            # Create a unique signature for debugging duplicates
-            trade_sig = f"{ticker}_{quantity}_{entryPrice:.2f}_{exitPrice:.2f}_{pnl:.2f}"
-            logger.info(f"[{strategyName}] Trade #{allTradesCount} [{trade_sig}] recorded: {ticker} {quantity}@{entryPrice:.2f}->{exitPrice:.2f}, P&L=${pnl:.2f} | Total P&L all-time: ${allTradesPnL:.2f}")
-    
-    def getProfitFactor(self, strategyName: str) -> float:
-        """
-        Get profit factor for a strategy using sliding window.
-        Profit Factor = sum(profits) / sum(losses)
-        
-        Returns 0.0 if no trades, handles division by zero.
-        """
-        with self._lock:
-            if strategyName not in self._tradeHistory or not self._tradeHistory[strategyName]:
-                return 0.0
-            
-            # Get last windowSize trades
-            recentTrades = self._tradeHistory[strategyName][-self.windowSize:]
-            
-            totalProfit = sum(t['pnl'] for t in recentTrades if t['pnl'] > 0)
-            totalLoss = abs(sum(t['pnl'] for t in recentTrades if t['pnl'] < 0))
-            
-            if totalLoss < 1e-6:  # No losses or negligible losses
-                return 1.0 if totalProfit > 0 else 0.0
-            
-            return totalProfit / totalLoss
-    
-    def getMetrics(self, strategyName: str) -> Dict[str, Any]:
-        """
-        Get metrics for a strategy (cached, sliding window).
-        
-        Returns:
-            {
-                'profitFactor': float,
-                'totalTrades': int,
-                'winCount': int,
-                'lossCount': int,
-                'avgWin': float,
-                'avgLoss': float,
-                'avgPnl': float,
-                'totalPnL': float
-            }
-        """
-        with self._lock:
-            if strategyName not in self._tradeHistory or not self._tradeHistory[strategyName]:
-                return {
-                    'profitFactor': 0.0,
-                    'totalTrades': 0,
-                    'winCount': 0,
-                    'lossCount': 0,
-                    'avgWin': 0.0,
-                    'avgLoss': 0.0,
-                    'avgPnl': 0.0,
-                    'totalPnL': 0.0
-                }
-            
-            # Get ALL trades for this strategy (not just window)
-            allTrades = self._tradeHistory[strategyName]
-            allTradesPnL = sum(t['pnl'] for t in allTrades)
-            allWins = [t for t in allTrades if t['pnl'] > 0]
-            allLosses = [t for t in allTrades if t['pnl'] < 0]
-            
-            # Get windowed trades for metrics calculation
-            recentTrades = allTrades[-self.windowSize:]
-            
-            wins = [t for t in recentTrades if t['pnl'] > 0]
-            losses = [t for t in recentTrades if t['pnl'] < 0]
-            
-            totalProfit = sum(t['pnl'] for t in wins) if wins else 0
-            totalLoss = sum(t['pnl'] for t in losses) if losses else 0
-            
-            metrics = {
-                'profitFactor': self.getProfitFactor(strategyName),
-                'totalTrades': len(recentTrades),
-                'winCount': len(wins),
-                'lossCount': len(losses),
-                'avgWin': totalProfit / len(wins) if wins else 0.0,
-                'avgLoss': abs(totalLoss / len(losses)) if losses else 0.0,
-                'avgPnl': sum(t['pnl'] for t in recentTrades) / len(recentTrades),
-                'totalPnL': sum(t['pnl'] for t in recentTrades)
-            }
-            
-            # Log detail if metrics show zero P&L but all-time P&L is non-zero
-            if metrics['totalPnL'] < 0.01 and allTradesPnL > 1.0:
-                logger.warning(f"[{strategyName}] METRICS MISMATCH: windowPnL=${metrics['totalPnL']:.2f} vs allTimePnL=${allTradesPnL:.2f} ({len(allTrades)} total trades, window={self.windowSize})")
-                logger.warning(f"  Window trades: {len(recentTrades)}, Wins={len(wins)} (${totalProfit:.2f}), Losses={len(losses)} (${abs(totalLoss):.2f})")
-                logger.warning(f"  All-time: Wins={len(allWins)} (${sum(t['pnl'] for t in allWins):.2f}), Losses={len(allLosses)} (${abs(sum(t['pnl'] for t in allLosses)):.2f})")
-                # Detail each trade
-                for i, trade in enumerate(allTrades):
-                    logger.warning(f"    Trade {i+1}: {trade['ticker']} {trade['quantity']}@${trade['entryPrice']:.2f}->${trade['exitPrice']:.2f} = ${trade['pnl']:.2f}")
-            
-            self._metricsCache[strategyName] = metrics
-            return metrics
-    
-    def getAllMetrics(self) -> Dict[str, Dict[str, Any]]:
-        """Get metrics for all strategies (returns copy to prevent external mutation)."""
-        with self._lock:
-            return {
-                strategy: self.getMetrics(strategy)
-                for strategy in self._tradeHistory.keys()
-            }
-    
-    def resetStrategy(self, strategyName: str) -> None:
-        """Clear performance history for a strategy."""
-        with self._lock:
-            if strategyName in self._tradeHistory:
-                del self._tradeHistory[strategyName]
-            if strategyName in self._metricsCache:
-                del self._metricsCache[strategyName]
-    
-    def recordRecommendation(self, strategyName: str, action: str, ticker: str, 
-                            price: float, confidence: float, simDate: str, mic: str = None) -> None:
-        """
-        Record a strategy recommendation (LONG, SHORT, or HOLD).
-        
-        Args:
-            strategyName: Name of strategy making recommendation
-            action: 'long', 'short', or 'hold'
-            ticker: Stock ticker
-            price: Price at time of recommendation
-            confidence: Strategy confidence in recommendation (0.0-1.0)
-            simDate: Simulation date (YYYY-MM-DD)
-            mic: Market identifier code (XNAS, XLON, XHKG, XJPX)
-        """
-        with self._lock:
-            if strategyName not in self._recommendationHistory:
-                self._recommendationHistory[strategyName] = []
-            
-            recommendation = {
-                'action': action,
-                'ticker': ticker,
-                'price': price,
-                'confidence': confidence,
-                'date': simDate,
-                'mic': mic,
-                'outcome': 'PENDING'
-            }
-            self._recommendationHistory[strategyName].append(recommendation)
-            logger.debug(f"[{strategyName}] Recommendation recorded: {action} {ticker} @ {price:.2f}")
-    
-    def scoreRecommendations(self, exchange, simDate: str, mic: str, thresholdPct: float = 2.0) -> None:
-        """
-        Retroactively score HOLD recommendations based on actual price movement.
-        
-        Args:
-            exchange: StockExchange instance to get current prices
-            simDate: Current simulation date (YYYY-MM-DD) for fetching prices
-            mic: Market identifier code for recommendations
-            thresholdPct: Percentage threshold for outcome classification (default 2%)
-        """
-        with self._lock:
-            for strategyName, recommendations in self._recommendationHistory.items():
-                for rec in recommendations:
-                    if rec['outcome'] != 'PENDING':
-                        continue  # Already scored
-                    
-                    # Only score HOLD recommendations; LONG/SHORT handled separately
-                    if rec['action'] != 'hold':
-                        continue
-                    
-                    try:
-                        ticker = rec['ticker']
-                        priceAtRec = rec['price']
-                        recMic = rec.get('mic', mic)  # Use stored MIC if available, else use provided
-                        
-                        # Get current price using the known MIC
-                        try:
-                            suffixedTicker = exchange.getMicTicker(ticker, recMic)
-                            data = exchange.getStockData(suffixedTicker, start=None, end=simDate)
-                            if data is None or len(data) == 0:
-                                continue
-                            
-                            currentPrice = float(data['Close'].iloc[-1])
-                            
-                            # Calculate percentage change
-                            pctChange = ((currentPrice - priceAtRec) / priceAtRec) * 100
-                            
-                            # Score based on threshold
-                            if pctChange > thresholdPct:
-                                rec['outcome'] = 'MISSED_LONG'
-                            elif pctChange < -thresholdPct:
-                                rec['outcome'] = 'MISSED_SHORT'
-                            else:
-                                rec['outcome'] = 'CORRECT'
-                            
-                            logger.debug(f"[{strategyName}] Scored HOLD {ticker}: {pctChange:+.2f}% -> {rec['outcome']}")
-                        
-                        except Exception as priceErr:
-                            logger.debug(f"Could not fetch price for {ticker}: {priceErr}")
-                    
-                    except Exception as e:
-                        logger.warning(f"Could not score recommendation for {rec['ticker']}: {e}")
-    
-    def getRecommendationMetrics(self, strategyName: str) -> Dict[str, Any]:
-        """
-        Get recommendation quality metrics for a strategy.
-        
-        Returns:
-            {
-                'totalRecommendations': int,
-                'holdCount': int,
-                'holdCorrect': int,
-                'holdMissedLong': int,
-                'holdMissedShort': int,
-                'holdAccuracy': float (0.0-1.0),
-                'longCount': int,
-                'shortCount': int,
-                'totalExecuted': int
-            }
-        """
-        with self._lock:
-            if strategyName not in self._recommendationHistory:
-                return {
-                    'totalRecommendations': 0,
-                    'holdCount': 0,
-                    'holdCorrect': 0,
-                    'holdMissedLong': 0,
-                    'holdMissedShort': 0,
-                    'holdAccuracy': 0.0,
-                    'longCount': 0,
-                    'shortCount': 0,
-                    'totalExecuted': 0
-                }
-            
-            recs = self._recommendationHistory[strategyName]
-            
-            holds = [r for r in recs if r['action'] == 'hold']
-            hold_correct = len([r for r in holds if r['outcome'] == 'CORRECT'])
-            hold_missed_long = len([r for r in holds if r['outcome'] == 'MISSED_LONG'])
-            hold_missed_short = len([r for r in holds if r['outcome'] in ('MISSED_SHORT', 'SOLD')])
-            
-            longs = [r for r in recs if r['action'] == 'long']
-            shorts = [r for r in recs if r['action'] == 'short']
-            
-            hold_accuracy = hold_correct / len(holds) if holds else 0.0
-            
-            return {
-                'totalRecommendations': len(recs),
-                'holdCount': len(holds),
-                'holdCorrect': hold_correct,
-                'holdMissedLong': hold_missed_long,
-                'holdMissedShort': hold_missed_short,
-                'holdAccuracy': hold_accuracy,
-                'longCount': len(longs),
-                'shortCount': len(shorts),
-                'totalExecuted': len(longs) + len(shorts),
-                'pendingCount': len([r for r in recs if r['outcome'] == 'PENDING'])
-            }
-    
-    def getAllRecommendations(self, limit: int = 50) -> List[Dict[str, Any]]:
-        """
-        Retrieve all recommendations across all strategies, sorted by date descending.
-        
-        Args:
-            limit: Maximum number of recommendations to return
-        
-        Returns:
-            List of recommendation dicts with 'strategy' field added to each
-        """
-        with self._lock:
-            allRecs = []
-            for strategyName, recs in self._recommendationHistory.items():
-                for rec in recs:
-                    recWithStrategy = rec.copy()
-                    recWithStrategy['strategy'] = strategyName
-                    allRecs.append(recWithStrategy)
-            
-            # Sort by date descending (most recent first)
-            allRecs.sort(key=lambda r: r.get('date', ''), reverse=True)
-            return allRecs[:limit]
-
-
-# EPSILON-GREEDY STRATEGY SELECTOR
-
-class StrategySelector:
-    """
-    Selects which strategy to use at a given timestep using epsilon-greedy sampling.
-    Balances exploitation (use top performer) with exploration (try others).
-    """
-    
-    def __init__(self, strategies: Dict[str, TradingStrategy], preferredStrategy: Optional[str] = None, epsilon: float = 0.2, 
-                 minTradesRequired: int = 3):
-        """
-        Initialise strategy selector with optional preferred strategy.
-        
-        If a preferred strategy is set and available, it will be prioritised over others.
-        
-        Args:
-            strategies: Dict mapping strategy names to TradingStrategy instances
-            preferredStrategy: Optional strategy name to preferentially select
-            epsilon: Probability of random exploration (default: 0.2 = 20% random)
-            minTradesRequired: Minimum trades per strategy before ranking (default: 3)
-        """
-        self.strategies = strategies
-        self.preferredStrategy = preferredStrategy
-        self.epsilon = epsilon
-        self.minTradesRequired = minTradesRequired
-        self._selectionHistory = []  
-    
-    def selectStrategy(self, performanceMetrics: Dict[str, Dict], 
-                      currentTradeCount: int) -> str:
-        """
-        Select a strategy using epsilon-greedy approach with preferred strategy support.
-        
-        If a preferred strategy is set and available, it has priority.
-        Exploration mode (uniform random): if tradeCount < minTradesRequired
-        Exploitation mode: with prob epsilon, random; else highest profitFactor
-        
-        Args:
-            performanceMetrics: Dict of strategyName -> metrics from PerformanceTracker.getAllMetrics()
-            currentTradeCount: Total trades executed so far by this agent
-        
-        Returns:
-            Selected strategy name
-        """
-        import random
-        import numpy as np
-        
-        availableStrategies = list(self.strategies.keys())
-        
-        # If a preferred strategy is set and available, use it
-        if self.preferredStrategy and self.preferredStrategy in availableStrategies:
-            logger.info(f"[StrategySelector] Using preferred strategy: {self.preferredStrategy}")
-            self._selectionHistory.append(self.preferredStrategy)
-            return self.preferredStrategy
-        
-        # Exploration mode: random until sufficient data
-        if currentTradeCount < self.minTradesRequired:
-            selected = random.choice(availableStrategies)
-            logger.info(f"[StrategySelector] Exploration mode ({currentTradeCount}/{self.minTradesRequired} trades): selected {selected}")
-            self._selectionHistory.append(selected)
-            return selected
-        
-        # Exploitation mode with epsilon-greedy
-        if random.random() < self.epsilon:
-            # Explore: select random strategy
-            selected = random.choice(availableStrategies)
-            logger.info(f"[StrategySelector] Exploration phase (epsilon={self.epsilon}): selected {selected}")
-        else:
-            # Exploit: select highest profit factor, with random tiebreaker for equal performers
-            bestPf = -np.inf
-            bestStrategies = []
-            
-            for strategyName in availableStrategies:
-                metrics = performanceMetrics.get(strategyName, {})
-                pf = metrics.get('profitFactor', 0.0)
-                
-                if pf > bestPf:
-                    bestPf = pf
-                    bestStrategies = [strategyName]
-                elif pf == bestPf:
-                    bestStrategies.append(strategyName)
-            
-            # Random tiebreaker: when multiple strategies have same best PF, pick randomly
-            selected = random.choice(bestStrategies) if bestStrategies else random.choice(availableStrategies)
-            logger.info(f"[StrategySelector] Exploitation: selected {selected} (PF={bestPf:.2f})")
-        
-        self._selectionHistory.append(selected)
-        return selected
-    
-    def getWeights(self) -> Dict[str, float]:
-        """Get current weight distribution across strategies based on selection history."""
-        if not self._selectionHistory:
-            # Uniform distribution if no history
-            n = len(self.strategies)
-            return {name: 1.0/n for name in self.strategies.keys()}
-        
-        # Count selections
-        from collections import Counter
-        counts = Counter(self._selectionHistory)
-        total = sum(counts.values())
-        
-        return {
-            strategyName: counts.get(strategyName, 0) / total
-            for strategyName in self.strategies.keys()
-        }
-
-
-# AGENT
-
 class Agent:
     '''
-    The intelligent stock trading agent with hyper-heuristic strategy delegator.
+    Stock trading agent with hyper-heuristic strategy delegator.
     
-    - Runs in background thread
-    - Maintains per-agent performance tracking (thread-safe)
-    - Selects strategies based on past profit factors
-    - Provides query interface for GUI
-    - Supports lifecycle control (pause/resume/stop)
-    - analyses all stocks in market at each timestep
+    - Runs in background thread.
+    - Maintains per-agent performance tracking.
+    - Selects strategies based on past profit factors.
+    - Provides query interface for GUI.
+    - Analyses all monitored stocks in market at each timestep. Acts on strategy recommendations.
     '''
     
-    # Market Identifier Code to ticker mapping
+    # Market Identifier Code to tickers.
+    # These are the stocks which are monitored per MIC.
     MIC_TICKERS = {
         'XNAS': ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'AMZN'],
         'XLON': ['BP', 'SHEL', 'AZN', 'VOD', 'HSBA'],
@@ -893,7 +56,7 @@ class Agent:
     }
 
     def __init__(self, agentId: int, accountId: int, mic: str = 'XLON', preferredStrategy: Optional[str] = None, 
-                 bannedStrategies: List[str] = None, simDate: str = None, endDate: str = None, decisionPeriod: int = 1):
+                 bannedStrategies: List[str] = [], simDate: str = None, endDate: str = None, decisionPeriod: int = 1):
         '''
         Initialise the agent.
         
@@ -911,10 +74,10 @@ class Agent:
         self.accountId = accountId
         self.mic = mic
         self.preferredStrategy = preferredStrategy
-        self.bannedStrategies = bannedStrategies or []
+        self.bannedStrategies = bannedStrategies
         self.simDate = simDate
         self.endDate = endDate
-        self.decisionPeriod = max(1, decisionPeriod)  # Ensure at least 1
+        self.decisionPeriod = decisionPeriod
         
         # Performance / strategy management
         self.performanceTracker = PerformanceTracker(windowSize=50)
@@ -924,7 +87,8 @@ class Agent:
         # Trade tracking
         self.totalTrades = 0
         self._executionLog: List[Dict] = []
-        self._timestepCounter = 0  # Tracks timesteps since last decision
+        # Used in end of experiment summaries as well as to periodically train LSTM and DQN
+        self._timestepCounter = 0  
         
         # DeepQL learning: cache entry states for trades so we can compute rewards on close
         # Maps (ticker): (state, action, entryPrice, entryDate) for open DeepQL trades
@@ -1023,7 +187,6 @@ class Agent:
                 logger.debug(f"Agent {self.agentId}: paused, skipping timestep")
                 return
         
-        # Increment timestep counter for tracking purposes
         self._timestepCounter += 1
         
         # Train LSTM periodically during simulation (every 10 timesteps)
@@ -1162,7 +325,6 @@ class Agent:
                 print(f"[Agent {self.agentId}] SUCCESS: LONG {ticker} x{quantity} via {strategyName}")
                 logger.info(f"Agent {self.agentId}: LONG {ticker} x{quantity} executed via {strategyName}")
                 self.totalTrades += 1
-                print(f"[TRADE LOG] TOTAL TRADES INCREMENTED to {self.totalTrades}")
             elif action == 'short':
                 print(f"[Agent {self.agentId}] EXECUTING SHORT: {ticker} x{quantity}")
                 result = exchange.placeShort(ticker, self.mic, quantity, self.accountId, simDate, 
@@ -1174,7 +336,6 @@ class Agent:
                 print(f"[Agent {self.agentId}] SUCCESS: SHORT {ticker} x{quantity} via {strategyName}")
                 logger.info(f"Agent {self.agentId}: SHORT {ticker} x{quantity} executed via {strategyName}")
                 self.totalTrades += 1
-                print(f"[TRADE LOG] TOTAL TRADES INCREMENTED to {self.totalTrades}")
             elif action == 'sell':
                 # Sell existing long position
                 portfolio = exchange.checkPortfolio(self.accountId, simDate)
@@ -1197,7 +358,6 @@ class Agent:
                         print(f"[Agent {self.agentId}] SUCCESS: SOLD {ticker} x{sell_qty} via {strategyName}")
                         logger.info(f"Agent {self.agentId}: SOLD {ticker} x{sell_qty} executed via {strategyName}")
                         self.totalTrades += 1
-                        print(f"[TRADE LOG] TOTAL TRADES INCREMENTED to {self.totalTrades}")
                     else:
                         logger.info(f"Agent {self.agentId}: No long position to sell for {ticker}")
                         return
@@ -1205,7 +365,6 @@ class Agent:
                     logger.info(f"Agent {self.agentId}: No portfolio data for {ticker}")
                     return
             
-            # Log execution (but don't double-count - trades are already incremented above)
             self._executionLog.append({
                 'strategy': strategyName,
                 'ticker': ticker,
@@ -1270,13 +429,12 @@ class Agent:
                     entry_state = cache_entry['state']
                     entry_action = cache_entry['action']
                     entry_price = cache_entry['entryPrice']
-                    entry_date = cache_entry['entryDate']
                     action_str = cache_entry.get('action_str', '')
                     
                     try:
                         # Get current price to compute reward
                         try:
-                            current_price = exchange._getSafePrice(ticker, self.mic, simDate)
+                            current_price = exchange.getPrice(ticker, self.mic, simDate)
                         except ValueError:
                             # Stock delisted or no data, skip
                             del self._deepql_state_cache[ticker]
@@ -1294,7 +452,6 @@ class Agent:
                             continue  # Unknown trade type
                         
                         # Build current state (next state from learning perspective)
-                        from qLearningStrategy import StateBuilder
                         next_state = StateBuilder.buildState(ticker, self.mic, simDate, exchange, analysisPeriod=self.decisionPeriod)
                         
                         # Record experience: (state, action, reward, next_state, done=True)
@@ -1363,23 +520,28 @@ class Agent:
                     if entry_action != expected_action_idx:
                         continue
                     
+                    # Skip if outcome not yet determined (don't train on incomplete information)
+                    if outcome == 'PENDING':
+                        logger.debug(f"Agent {self.agentId}: Skipping HOLD {ticker} - outcome still PENDING")
+                        continue
+                    
                     try:
                         # Convert outcome to reward (same logic for HOLD and SELL)
+                        # Scaled to match LONG/SHORT reward magnitudes (50x larger than before)
                         if outcome == 'CORRECT':
                             # HOLD/SELL was right - price stayed flat or fell (good exit)
-                            reward = 0.01
+                            reward = 0.05  # Increased from 0.01
                         elif outcome == 'MISSED_LONG':
                             # HOLD/SELL was wrong - missed an up move
-                            reward = -0.02
+                            reward = -0.10  # Increased from -0.02
                         elif outcome == 'MISSED_SHORT':
                             # HOLD/SELL was wrong - missed a down move (less common)
-                            reward = -0.02
+                            reward = -0.10  # Increased from -0.02
                         else:
                             # Unknown outcome, skip
                             continue
                         
                         # Build current state at simDate
-                        from qLearningStrategy import StateBuilder
                         next_state = StateBuilder.buildState(ticker, self.mic, simDate, exchange, analysisPeriod=self.decisionPeriod)
                         
                         # Record experience
@@ -1438,23 +600,12 @@ class Agent:
     
     def getRecentTrades(self, limit: int = 10) -> List[Dict[str, Any]]:
         """
-        Get recent closed trades across all strategies.
+        Get recent execution log across all strategies.
         
         Returns:
-            List of trade dicts (last N trades, most recent first)
+            List of execution dicts (last N executions, most recent first)
         """
-        # TODO
         return self._executionLog[-limit:]
-    
-    def getCurrentOpenPositions(self) -> List[Dict[str, Any]]:
-        """
-        Get current open positions in portfolio.
-        
-        Returns:
-            List of active long/short positions
-        """
-        # TODO
-        return []
     
     def getStrategyWeights(self) -> Dict[str, float]:
         """Get current epsilon-greedy weights for each strategy."""
@@ -1501,7 +652,6 @@ class Agent:
             decisionPeriod: Number of days between trading decisions (minimum 1)
         '''
         self.decisionPeriod = max(1, decisionPeriod)
-        print(f"DEBUG: Agent {self.agentId} decisionPeriod updated to {self.decisionPeriod} days")
         logger.info(f"Agent {self.agentId}: decision period changed to {self.decisionPeriod} days")
     
     def getDecisionPeriod(self) -> int:
@@ -1512,15 +662,6 @@ class Agent:
             Current decision period in days
         '''
         return self.decisionPeriod
-    
-    def getTimestepCounter(self) -> int:
-        '''
-        Get the current timestep counter (progess in current decision window).
-        
-        Returns:
-            Current timestep in the decision window (0 to decisionPeriod-1)
-        '''
-        return self._timestepCounter % self.decisionPeriod if self.decisionPeriod > 0 else 0
     
     def runIteration(self, exchange, ticker: str, simDate: str = None) -> None:
         '''

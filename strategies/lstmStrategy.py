@@ -15,7 +15,7 @@ from collections import deque
 import random
 import logging
 from datetime import datetime, timedelta
-from tradingStrategy import TradingStrategy
+from .tradingStrategy import TradingStrategy
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

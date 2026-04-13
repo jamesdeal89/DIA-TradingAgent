@@ -61,14 +61,14 @@ class Agent:
         Initialise the agent.
         
         Args:
-            agentId: Unique agent identifier
-            accountId: Trading account ID (for executing trades)
-            mic: Market Identifier Code ('XNAS', 'XLON', 'XHKG', 'XJPX')
-            preferredStrategy: Optional strategy to preferentially select
-            bannedStrategies: List of strategy names to exclude from selection
+            agentId: Unique agent identifier.
+            accountId: Trading account ID (for executing trades via the stock exchange.)
+            mic: Market Identifier Code to set what exchange this agent operates in.
+            preferredStrategy: Optional - used to test a single specific strategy.
+            bannedStrategies: List of strategy names to exclude from selection.
             simDate: Initial simulation date (YYYY-MM-DD format)
-            endDate: End date for simulation (YYYY-MM-DD format). If None, simulation runs until max news date
-            decisionPeriod: Days between trading decisions (default 1 = daily decisions)
+            endDate: End date for simulation (YYYY-MM-DD format). At the end of the experiment, a report is printed in the logs.
+            decisionPeriod: Days between trading decisions (default 1 = daily decisions.) Can be changed mid-run via setDecisionPeriod().
         '''
         self.agentId = agentId
         self.accountId = accountId
@@ -81,22 +81,23 @@ class Agent:
         
         # Performance / strategy management
         self.performanceTracker = PerformanceTracker(windowSize=50)
-        self.strategies: Dict[str, TradingStrategy] = {}  # Will be populated by _initialiseStrategies()
+        # Later filled by _initialiseStrategies()
+        self.strategies: Dict[str, TradingStrategy] = {}  
         self.strategySelector: Optional[StrategySelector] = None
         
-        # Trade tracking
+        # Trade tracking 
         self.totalTrades = 0
         self._executionLog: List[Dict] = []
-        # Used in end of experiment summaries as well as to periodically train LSTM and DQN
+        # Used in end of experiment summaries as well as to know when to periodically train LSTM and DQN
         self._timestepCounter = 0  
         
-        # DeepQL learning: cache entry states for trades so we can compute rewards on close
-        # Maps (ticker): (state, action, entryPrice, entryDate) for open DeepQL trades
+        # DeepQL learning: cache entry states for trades so we can compute rewards on close.
+        # Maps (ticker): (state, action, entryPrice, entryDate) for open DeepQL trades.
         self._deepql_state_cache: Dict[str, Dict[str, Any]] = {}
-        # Track when we last trained to avoid overtraining
+        # Track when last trained to avoid overtraining.
         self._last_training_timestep = 0  
         
-        # Lifecycle control
+        # For early stopping of an agent - needed for 'pause' button in GUI.
         self._pauseFlag = False
         self._stopFlag = False
         self._lock = threading.Lock()
@@ -104,11 +105,11 @@ class Agent:
         # Initialise strategies
         self._initialiseStrategies()
         
-        logger.info(f"Agent {agentId} initialised (accountId={accountId}, MIC={mic}, simDate={simDate}, endDate={endDate}, decisionPeriod={self.decisionPeriod}d)")
+        logger.info(f"Agent {agentId} initialised (accountId= {accountId}, MIC= {mic}, simDate= {simDate}, endDate= {endDate}, decisionPeriod= {self.decisionPeriod} days)")
     
     def _initialiseStrategies(self) -> None:
-        """Initialise all available strategies, respecting banned/preferred."""
-        # Instantiate all trading strategies
+        """Initialise all available strategies, considering banned/preferred."""
+        # Complete dict of strategies.
         all_strategies = {
             'Sentiment': SentimentStrategy(),
             'MeanReversion': MeanReversionStrategy(),
@@ -130,7 +131,7 @@ class Agent:
         
         self.strategySelector = StrategySelector(self.strategies, preferredStrategy=self.preferredStrategy, epsilon=0.35, minTradesRequired=2)
     
-    # LIFECYCLE CONTROL
+    # Lifecycle methods:
     
     def pause(self) -> None:
         """Pause agent execution between iterations."""
@@ -160,7 +161,7 @@ class Agent:
         with self._lock:
             return self._pauseFlag
     
-    # EXECUTION: TIMESTEP (ALL STOCKS)
+    # Core execution methods:
     
     def runTimestep(self, exchange, simDate: str = None) -> None:
         '''
@@ -625,6 +626,15 @@ class Agent:
         self.simDate = simDate
         print(f"DEBUG: Agent {self.agentId} simDate updated to {self.simDate}")
     
+    def getSimDate(self) -> str:
+        '''
+        Get the current simulation date for the agent.
+        
+        Returns:
+            Current simulation date (YYYY-MM-DD)
+        '''
+        return self.simDate
+    
     def setEndDate(self, endDate: str) -> None:
         '''
         Set the end date for the simulation (for repeatable historical backtests).
@@ -662,6 +672,51 @@ class Agent:
             Current decision period in days
         '''
         return self.decisionPeriod
+    
+    def getTimestepCounter(self) -> int:
+        '''
+        Get the total number of timesteps executed.
+        
+        Returns:
+            Total timesteps processed since agent creation
+        '''
+        return self._timestepCounter
+    
+    def getTotalTrades(self) -> int:
+        '''
+        Get the total number of trades placed.
+        
+        Returns:
+            Total trades executed
+        '''
+        return self.totalTrades
+    
+    def getExecutionLog(self) -> List[Dict]:
+        '''
+        Get the agent's execution log.
+        
+        Returns:
+            List of execution log entries
+        '''
+        return self._executionLog
+    
+    def getStrategies(self) -> Dict[str, TradingStrategy]:
+        '''
+        Get the available strategies.
+        
+        Returns:
+            Dictionary mapping strategy names to TradingStrategy instances
+        '''
+        return self.strategies
+    
+    def getPerformanceTracker(self) -> 'PerformanceTracker':
+        '''
+        Get the performance tracker instance.
+        
+        Returns:
+            PerformanceTracker instance
+        '''
+        return self.performanceTracker
     
     def runIteration(self, exchange, ticker: str, simDate: str = None) -> None:
         '''

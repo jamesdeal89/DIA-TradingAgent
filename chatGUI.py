@@ -65,16 +65,16 @@ def logSimulationFinalResults(accountId: int, agent, exchange, agentData=None, c
         cursor.close()
         
         # Close all open positions to get true final P&L
-        closureDate = closureDate or agent.simDate
+        closureDate = closureDate or agent.getSimDate()
         print(f"\nClosing all open positions at {closureDate}...")
         positions_closed = exchange.closeAllOpenPositions(agent.accountId, closureDate, agent.agentId)
         print(f"Closed {positions_closed} open position(s)")
         
         # Train LSTM strategy at episode end
-        if 'LSTM' in agent.strategies:
+        if 'LSTM' in agent.getStrategies():
             try:
                 logger.info(f"Agent {agent.agentId}: Starting LSTM training at episode end")
-                agent.strategies['LSTM'].train(batchSize=32, epochs=1)
+                agent.getStrategies()['LSTM'].train(batchSize=32, epochs=1)
                 logger.info(f"Agent {agent.agentId}: LSTM training completed")
             except Exception as e:
                 logger.error(f"LSTM training failed: {e}")
@@ -102,10 +102,10 @@ def logSimulationFinalResults(accountId: int, agent, exchange, agentData=None, c
         print(f"SIMULATION FINAL RESULTS - Agent {accountId}")
         print(f"{'='*80}")
         start_date = agentData.get('simDate') if agentData else 'Unknown'
-        print(f"Simulation Date Range: {start_date} -> {agent.simDate}")
+        print(f"Simulation Date Range: {start_date} -> {agent.getSimDate()}")
         print(f"Decision Period: {agent.getDecisionPeriod()} days")
-        print(f"Total Timesteps: {agent._timestepCounter}")
-        print(f"Total Trades: {agent.totalTrades}")
+        print(f"Total Timesteps: {agent.getTimestepCounter()}")
+        print(f"Total Trades: {agent.getTotalTrades()}")
         print()
         
         # Portfolio summary from history
@@ -128,7 +128,7 @@ def logSimulationFinalResults(accountId: int, agent, exchange, agentData=None, c
         # Strategy comparison
         try:
             print("STRATEGY PERFORMANCE:")
-            print(ResponseFormatter.formatStrategyComparison(agent.performanceTracker, agent._executionLog))
+            print(ResponseFormatter.formatStrategyComparison(agent.getPerformanceTracker(), agent.getExecutionLog()))
             print()
         except Exception as e:
             print(f"Note: Could not format strategy comparison: {e}")
@@ -138,9 +138,10 @@ def logSimulationFinalResults(accountId: int, agent, exchange, agentData=None, c
         try:
             print("[DEBUG] DETAILED TRADE HISTORY FROM PERFORMANCE TRACKER:")
             total_trades_recorded = 0
-            if hasattr(agent.performanceTracker, '_tradeHistory'):
-                for strategy_name in sorted(agent.performanceTracker._tradeHistory.keys()):
-                    trades = agent.performanceTracker._tradeHistory[strategy_name]
+            performanceTracker = agent.getPerformanceTracker()
+            if hasattr(performanceTracker, '_tradeHistory'):
+                for strategy_name in sorted(performanceTracker._tradeHistory.keys()):
+                    trades = performanceTracker._tradeHistory[strategy_name]
                     if trades:
                         total_trades_recorded += len(trades)
                         print(f"\n{strategy_name}: {len(trades)} total trades")
@@ -149,8 +150,8 @@ def logSimulationFinalResults(accountId: int, agent, exchange, agentData=None, c
                         total_pnl = sum(t['pnl'] for t in trades)
                         print(f"  TOTAL P&L: ${total_pnl:,.2f}")
             print(f"\nTOTAL TRADES RECORDED: {total_trades_recorded}")
-            print(f"TOTAL TRADES PLACED (from log): {agent.totalTrades}")
-            print(f"MISSING TRADES: {agent.totalTrades - total_trades_recorded}")
+            print(f"TOTAL TRADES PLACED (from log): {agent.getTotalTrades()}")
+            print(f"MISSING TRADES: {agent.getTotalTrades() - total_trades_recorded}")
             print()
         except Exception as e:
             print(f"[DEBUG] Could not print trade history: {e}\n")
@@ -159,8 +160,9 @@ def logSimulationFinalResults(accountId: int, agent, exchange, agentData=None, c
         try:
             print("HOLD RECOMMENDATION ANALYSIS:")
             recommendationMetrics = {}
-            for strategyName in agent.strategies.keys():
-                recommendationMetrics[strategyName] = agent.performanceTracker.getRecommendationMetrics(strategyName)
+            strategies = agent.getStrategies()
+            for strategyName in strategies.keys():
+                recommendationMetrics[strategyName] = agent.getPerformanceTracker().getRecommendationMetrics(strategyName)
             
             hold_analysis = ResponseFormatter.formatRecommendationQuality(recommendationMetrics)
             print(hold_analysis)
@@ -219,13 +221,9 @@ def runAgentTradeLoop(accountId, agentData, exchange):
     while agentData.get('threadRunning', True):
         isRealtimeMode = agentData.get('isRealtimeMode', False)
         
-        if not agentData.get('threadActive', True):
-            time.sleep(0.5)
-            continue
-        
         try:
             agent = agentData['agent']
-            simDate = agent.simDate
+            simDate = agent.getSimDate()
             
             # Check simulation boundaries
             if isRealtimeMode:
@@ -269,7 +267,6 @@ def runAgentTradeLoop(accountId, agentData, exchange):
                     hasReachedLimit = True
                 
                 if hasReachedLimit:
-                    agentData['threadActive'] = False
                     agentData['threadRunning'] = False
                     print(f"DEBUG: Agent {accountId} simulation ended at {simDate}.")
                     logSimulationFinalResults(accountId, agent, exchange, agentData, lastValidSimDate)
@@ -292,13 +289,16 @@ def runAgentTradeLoop(accountId, agentData, exchange):
                     if nextDateTime > endDateTime:
                         shouldAdvance = False
                         print(f"DEBUG: Next timestep ({nextDate}) would exceed end date ({endDate}). Stopping after this timestep.")
-                        agentData['threadActive'] = False
                         agentData['threadRunning'] = False
                         # Log final results when end date reached
                         logSimulationFinalResults(accountId, agent, exchange, agentData, simDate)
                 
                 if shouldAdvance:
                     agent.setSimDate(nextDate)
+                elif endDate:
+                    agentData['threadRunning'] = False
+                    # Log final results when end date reached
+                    logSimulationFinalResults(accountId, agent, exchange, agentData, simDate)
             
             timestep_count += 1
         except Exception as e:
@@ -342,7 +342,7 @@ def startAgent(mic, prefStrategy, bannedList, simDate=None, endDate=None, decisi
         )
         
         # Pass agent's performanceTracker to exchange so closed trades get recorded
-        exchange.performanceTracker = agent.performanceTracker
+        exchange.performanceTracker = agent.getPerformanceTracker()
         
         st.session_state.activeAgents[accountId] = {
             'agent': agent,
@@ -353,8 +353,7 @@ def startAgent(mic, prefStrategy, bannedList, simDate=None, endDate=None, decisi
             'endDate': endDate,
             'decisionPeriod': decisionPeriod,
             'isRealtimeMode': isRealtimeMode,
-            'threadRunning': True,
-            'threadActive': True
+            'threadRunning': True
         }
         
         agentData = st.session_state.activeAgents[accountId]
@@ -418,9 +417,9 @@ def chatGUI():
                     st.caption("Historical Simulation Settings")
                     col_start, col_end = st.columns(2)
                     with col_start:
-                        simDate = st.date_input("Start date", value=datetime(2011, 1, 1), min_value=datetime(1990, 1, 1), max_value=datetime.now(), key="sim_start")
+                        simDate = st.date_input("Start date", value=datetime(2010, 1, 1), min_value=datetime(1990, 1, 1), max_value=datetime.now(), key="sim_start")
                     with col_end:
-                        endDate = st.date_input("End date (optional)", value=datetime(2011, 12, 31), min_value=datetime(1990, 1, 1), max_value=datetime.now(), key="sim_end")
+                        endDate = st.date_input("End date (optional)", value=datetime(2020, 1, 1), min_value=datetime(1990, 1, 1), max_value=datetime.now(), key="sim_end")
             
             decisionPeriod = st.slider("Decision period (days)", min_value=1, max_value=60, value=1, step=1, help="Make trading decisions every N days instead of daily. Helps reduce noise by analyzing larger time windows.")
             
@@ -447,8 +446,10 @@ def chatGUI():
 
         agentData = st.session_state.activeAgents.get(aId)
         # Read simDate directly from agent object to always stay in sync
-        simDate = agentData['agent'].simDate if agentData and 'agent' in agentData else datetime.now().strftime('%Y-%m-%d')
-        threadActive = agentData.get('threadActive', True) if agentData else False
+        simDate = agentData['agent'].getSimDate() if agentData and 'agent' in agentData else datetime.now().strftime('%Y-%m-%d')
+        # Check if agent is paused
+        agent = agentData['agent'] if agentData else None
+        threadActive = not (agent and agent.isPaused()) if agent else True
         
         st.title(f"Trading Agent {st.session_state.activeAgentId} Chat")
 
@@ -482,13 +483,16 @@ def chatGUI():
         controlCol1, controlCol2, controlCol3 = st.columns(3)
         with controlCol1:
             if st.button("Pause" if threadActive else "Resume", key="pauseResumeBtn"):
-                st.session_state.activeAgents[aId]['threadActive'] = not threadActive
+                if threadActive:
+                    agent.pause()
+                else:
+                    agent.resume()
                 st.rerun()
         with controlCol2:
             if st.button("Stop Trading"):
                 st.session_state.activeAgents[aId]['threadRunning'] = False
                 time.sleep(0.5)
-                st.info("Agent trading stopped. Back to dashboard to restart.")
+                st.info("Agent trading stopped. Go back to dashboard to start another.")
         with controlCol3:
             if st.button("Clear Messages"):
                 st.session_state[messagesKey] = []
@@ -513,7 +517,7 @@ def chatGUI():
                     if agentData:
                         agent = agentData['agent']
                         chart_data = ResponseFormatter.formatPerformanceChartData(
-                            agent.performanceTracker, exchange, agent.accountId
+                            agent.getPerformanceTracker(), exchange, agent.accountId
                         )
                         
                         if chart_data['hasData']:
@@ -564,7 +568,7 @@ def chatGUI():
                         
                         # Get chart data
                         chart_data = ResponseFormatter.formatPerformanceChartData(
-                            agent.performanceTracker, exchange, agent.accountId
+                            agent.getPerformanceTracker(), exchange, agent.accountId
                         )
                         
                         # Store performance display info in session state
@@ -598,7 +602,7 @@ def chatGUI():
                     
                     elif intentLabel == "strategy":
                         # Display strategy ranking and comparison
-                        response = ResponseFormatter.formatStrategyComparison(agent.performanceTracker, agent._executionLog)
+                        response = ResponseFormatter.formatStrategyComparison(agent.getPerformanceTracker(), agent.getExecutionLog())
                         
                         # Display in chat
                         with st.chat_message("assistant"):
@@ -606,7 +610,7 @@ def chatGUI():
                         st.session_state[messagesKey].append({"role": "ai", "content": response})
                     
                     elif intentLabel == "actions":
-                        recentActions = agent.performanceTracker.getAllRecommendations(limit=20)
+                        recentActions = agent.getPerformanceTracker().getAllRecommendations(limit=20)
                         response = ResponseFormatter.formatRecentActions(recentActions, limit=20)
                         
                         # Display response
@@ -616,7 +620,7 @@ def chatGUI():
                     
                     elif intentLabel == "portfolio":
                         balance = exchange.checkBalance(agent.accountId) or 0
-                        portfolio = exchange.checkPortfolio(agent.accountId, agent.simDate)
+                        portfolio = exchange.checkPortfolio(agent.accountId, agent.getSimDate())
                         portfolioDict = {}
                         if portfolio is not None and not portfolio.empty:
                             for _, row in portfolio.iterrows():
@@ -631,7 +635,7 @@ def chatGUI():
                                         qty = row.get('quantity', 0)
                                         # Get current price
                                         try:
-                                            current_price = exchange.getPrice(ticker, mic, agent.simDate)
+                                            current_price = exchange.getPrice(ticker, mic, agent.getSimDate())
                                         except ValueError:
                                             current_price = entry_price  # Fall back to entry price if error
                                         portfolioDict[ticker]['long'] = qty
@@ -642,7 +646,7 @@ def chatGUI():
                                         qty = row.get('quantity', 0)
                                         # Get current price
                                         try:
-                                            current_price = exchange.getPrice(ticker, mic, agent.simDate)
+                                            current_price = exchange.getPrice(ticker, mic, agent.getSimDate())
                                         except ValueError:
                                             current_price = entry_price  # Fall back to entry price if error
                                         portfolioDict[ticker]['short'] = qty
@@ -658,8 +662,8 @@ def chatGUI():
                     elif intentLabel == "recommendation":
                         # Display recommendation quality metrics - were holds accurate?
                         recommendationMetrics = {}
-                        for strategyName in agent.strategies.keys():
-                            recommendationMetrics[strategyName] = agent.performanceTracker.getRecommendationMetrics(strategyName)
+                        for strategyName in agent.getStrategies().keys():
+                            recommendationMetrics[strategyName] = agent.getPerformanceTracker().getRecommendationMetrics(strategyName)
                         
                         response = ResponseFormatter.formatRecommendationQuality(recommendationMetrics)
                         

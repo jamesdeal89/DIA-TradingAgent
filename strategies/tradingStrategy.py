@@ -1,24 +1,22 @@
 """
 Abstract base class for trading strategies.
 """
-
 from abc import ABC, abstractmethod
 from typing import Dict, Any
-
 
 class TradingStrategy(ABC):
     """
     Abstract base class for all trading strategies.
     Each strategy implements analyse() to return a trade recommendation.
     """
-    
-    def __init__(self, name: str, version: str = "1.0"):
+
+    def __init__(self, name, version='1.0'):
         """Initialise strategy with name and version."""
         self.name = name
         self.version = version
-    
+
     @abstractmethod
-    def analyse(self, ticker: str, mic: str, simDate: str, exchange) -> Dict[str, Any]:
+    def analyse(self, ticker, mic, simDate, exchange):
         """
         Analyse a stock and return a trade recommendation.
         
@@ -37,11 +35,11 @@ class TradingStrategy(ABC):
             }
         """
         pass
-    
-    def getName(self) -> str:
+
+    def getName(self):
         """Return strategy name."""
         return self.name
-    
-    def getVersion(self) -> str:
+
+    def getVersion(self):
         """Return strategy version."""
         return self.version

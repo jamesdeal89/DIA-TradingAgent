@@ -1,15 +1,15 @@
 """
-LSTM Trading Strategy.
+Trading Strategy.
+DQL with an LSTM-MLP.
 
 Uses Long Short-Term Memory neural network to learn trading decisions from 
-historical price sequences. The network processes past lookback-day price 
-histories and predicts optimal trading actions based on temporal patterns.
+historical price sequences. The network processes past lookback-day price histories 
+and predicts optimal trading actions based on this.
 """
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from typing import Dict, List, Any, Optional
 from collections import deque
 import random
 import logging
@@ -23,19 +23,18 @@ class LSTMNetwork(nn.Module):
 
     def __init__(self, lookbackDays, inputFeatures=6, hiddenSize=32, actionSize=4):
         """
-        Initialise LSTM network.
+        Initialise LSTM-MLP.
         
-        Args:
-            lookbackDays: Number of days in sequence
-            inputFeatures: Number of features per day (OHLCV + RSI)
-            hiddenSize: LSTM hidden layer size
-            actionSize: Number of actions (4: BUY, SELL, SHORT, CLOSE)
+        lookbackDays: Number of days in sequence
+        inputFeatures: Number of features per day (Open, High, Low, Close, Volume, RSI)
+        hiddenSize: LSTM hidden layer size
+        actionSize: Number of actions, currently 4 for: BUY, SELL, SHORT, CLOSE.
         """
         super(LSTMNetwork, self).__init__()
         self.lookbackDays = lookbackDays
         self.inputFeatures = inputFeatures
         self.hiddenSize = hiddenSize
-        self.lstm = nn.LSTM(input_size=inputFeatures, hidden_size=hiddenSize, num_layers=1, batch_first=True)
+        self.lstm = nn.LSTM(input_size=inputFeatures, hiddenSize=hiddenSize, num_layers=1, batch_first=True)
         self.fc1 = nn.Linear(hiddenSize, 64)
         self.fc2 = nn.Linear(64, 32)
         self.fc3 = nn.Linear(32, actionSize)
@@ -44,14 +43,11 @@ class LSTMNetwork(nn.Module):
     def forward(self, x):
         """
         Forward pass through network.
+        'x' is the input tensor of format [batch, lookbackDays, inputFeatures]
         
-        Args:
-            x: Input tensor of shape [batch, lookbackDays, inputFeatures]
-        
-        Returns:
-            Q-values for each action [batch, actionSize]
+        Returns Q-values for each action [batch, actionSize]
         """
-        lstmOut, (h_n, c_n) = self.lstm(x)
+        lstmOut, _ = self.lstm(x)
         lastHidden = lstmOut[:, -1, :]
         x = self.relu(self.fc1(lastHidden))
         x = self.relu(self.fc2(x))
@@ -68,11 +64,10 @@ class LSTMStrategy(TradingStrategy):
         """
         Initialise LSTM strategy.
         
-        Args:
-            hiddenSize: LSTM hidden layer size
-            learningRate: Adam optimiser learning rate
-            epsilon: Epsilon-greedy exploration rate
-            gamma: Discount factor for future rewards
+        hiddenSize sets the LSTM hidden layer size.
+        learningRate is for Adam optimiser.
+        epsilon sets the exploration percent chance.
+        gamma is the discount factor for future rewards.
         """
         super().__init__(name='LSTM', version='1.0')
         self.hiddenSize = hiddenSize
@@ -86,14 +81,14 @@ class LSTMStrategy(TradingStrategy):
         self.replayBuffer = deque(maxlen=5000)
         self.actionSpace = ['BUY', 'SELL', 'SHORT', 'CLOSE']
 
-    def _initialiseNetwork(self, lookbackDays):
-        """Initialise network for given lookback window."""
+    def initialiseNetwork(self, lookbackDays):
+        """Initialise network for the passed lookback window."""
         if self.network is None:
             self.network = LSTMNetwork(lookbackDays=lookbackDays, inputFeatures=self.inputFeatures, hiddenSize=self.hiddenSize, actionSize=len(self.actionSpace))
             self.optimiser = optim.Adam(self.network.parameters(), lr=self.learningRate)
 
-    def _computeRSI(self, prices, period=14):
-        """Compute Relative Strength Index."""
+    def computeRsi(self, prices, period=14):
+        """Calculate Relative Strength Index."""
         if len(prices) < period:
             return np.zeros(len(prices))
         deltas = np.diff(prices)
@@ -106,23 +101,21 @@ class LSTMStrategy(TradingStrategy):
         for i in range(period, len(prices)):
             delta = deltas[i - 1]
             if delta > 0:
-                upval = delta
-                downval = 0.0
+                upVal = delta
+                downVal = 0.0
             else:
-                upval = 0.0
-                downval = -delta
-            up = (up * (period - 1) + upval) / period
-            down = (down * (period - 1) + downval) / period
+                upVal = 0.0
+                downVal = -delta
+            up = (up * (period - 1) + upVal) / period
+            down = (down * (period - 1) + downVal) / period
             rs = up / down if down != 0 else 0
             rsi[i] = 100.0 - 100.0 / (1.0 + rs)
         return rsi
 
-    def _getSequenceFeatures(self, ticker, mic, simDate, exchange, lookbackDays):
+    def getSequenceFeatures(self, ticker, mic, simDate, exchange, lookbackDays):
         """
         Fetch price history and compute feature sequence.
-        
-        Returns:
-            numpy array of shape [lookbackDays, 6] or None if insufficient data
+        Returns a numpy array of format [lookbackDays, 6] or None if not enough data.
         """
         try:
             endDate = datetime.strptime(simDate, '%Y-%m-%d')
@@ -135,7 +128,7 @@ class LSTMStrategy(TradingStrategy):
             low = data['Low'].values
             openPrices = data['Open'].values
             volume = data['Volume'].values
-            rsi = self._computeRSI(close)
+            rsi = self.computeRsi(close)
             features = np.column_stack((openPrices, high, low, close, volume, rsi))
             if len(features) < lookbackDays:
                 return None
@@ -152,17 +145,14 @@ class LSTMStrategy(TradingStrategy):
     def analyse(self, ticker, mic, simDate, exchange, analysisPeriod=20):
         """
         Predict trading action using LSTM network.
+        analysisPeriod is the lookback window in days
         
-        Args:
-            analysisPeriod: Historical lookback window in days
-        
-        Returns:
-            Trading recommendation with action, confidence, and reasoning
+        Returns trading recommendation with action, confidence, and reasoning
         """
         try:
             lookbackDays = max(10, analysisPeriod)
-            self._initialiseNetwork(lookbackDays)
-            features = self._getSequenceFeatures(ticker, mic, simDate, exchange, lookbackDays)
+            self.initialiseNetwork(lookbackDays)
+            features = self.getSequenceFeatures(ticker, mic, simDate, exchange, lookbackDays)
             if features is None:
                 logger.info(f'LSTM {ticker}: insufficient historical data at {simDate} (need {lookbackDays} days)')
                 return {'action': 'hold', 'confidence': 0.0, 'reason': f'Insufficient historical data (< {lookbackDays} days)', 'targetQuantity': 1}
@@ -179,29 +169,38 @@ class LSTMStrategy(TradingStrategy):
             qProbs = torch.softmax(qValues[0], dim=0)
             confidence = float(qProbs[actionIdx].item())
             actionMap = {'BUY': 'long', 'SELL': 'sell', 'SHORT': 'short', 'CLOSE': 'sell'}
-            return {'action': actionMap[action], 'confidence': confidence, 'reason': f'LSTM predicts {action} (Q={qValues[0][actionIdx].item():.3f}) over {lookbackDays}d', 'targetQuantity': 1}
+            return {'action': actionMap[action], 'confidence': confidence, 'reason': f'LSTM predicts {action} (Q={qValues[0][actionIdx].item():.3f}) over {lookbackDays}d', 'targetQuantity': 1, 'qvalues': qValues[0].cpu().numpy().tolist(), 'state': features.tolist()}
         except Exception as e:
             logger.error(f'Error in LSTM analysis for {ticker} at {simDate}: {e}')
             return {'action': 'hold', 'confidence': 0.0, 'reason': f'Analysis failed: {str(e)}', 'targetQuantity': 1}
 
-    def remember(self, state, action, reward, nextState, done):
-        """Store experience in replay buffer."""
-        self.replayBuffer.append({'state': state, 'action': action, 'reward': reward, 'nextState': nextState, 'done': done})
+    def recordExperience(self, state, action, reward, nextState, done):
+        """
+        Record experience for training via experience replay.
+        """
+        self.replayBuffer.append({
+            'state': state,
+            'action': action,
+            'reward': reward,
+            'nextState': nextState,
+            'done': done
+        })
 
     def train(self, batchSize=32, epochs=1):
         """
         Train network on random samples from replay buffer.
         
-        Args:
-            batchSize: Number of samples per batch
-            epochs: Number of training iterations
+        batchSize is the number of samples per batch to train with.
+        epochs is the number of training iterations (default 1).
+            
+        Returns the average loss over all epochs, or 0.0 if training skipped.
         """
         if len(self.replayBuffer) < batchSize or self.network is None:
             logger.debug(f'LSTM training skipped: buffer size {len(self.replayBuffer)} < batch size {batchSize}')
-            return
+            return 0.0
         logger.info(f'LSTM training started: buffer size={len(self.replayBuffer)}, batch size={batchSize}, epochs={epochs}')
         totalLoss = 0.0
-        for epoch in range(epochs):
+        for _ in range(epochs):
             batch = random.sample(self.replayBuffer, min(batchSize, len(self.replayBuffer)))
             states = torch.stack([torch.FloatTensor(b['state']) for b in batch])
             actions = torch.LongTensor([b['action'] for b in batch])
@@ -219,3 +218,4 @@ class LSTMStrategy(TradingStrategy):
             self.optimiser.step()
         avgLoss = totalLoss / epochs
         logger.info(f'LSTM training completed: average loss={avgLoss:.6f}')
+        return float(avgLoss)

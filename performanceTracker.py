@@ -5,8 +5,6 @@ Thread-safe tracking of strategy performance using profit factor.
 Maintains rolling window metrics and all-time statistics.
 """
 import threading
-from typing import Dict, List, Any
-from collections import Counter
 import logging
 logger = logging.getLogger(__name__)
 
@@ -19,9 +17,7 @@ class PerformanceTracker:
     def __init__(self, windowSize=50):
         """
         Initialise performance tracker.
-        
-        Args:
-            windowSize: Number of recent trades to consider for sliding window metrics (default: 50)
+        windowSize is the number of recent trades to consider for sliding window metrics.
         """
         self._lock = threading.RLock()
         self.windowSize = windowSize
@@ -32,16 +28,6 @@ class PerformanceTracker:
     def recordTrade(self, strategyName, entryPrice, exitPrice, quantity, ticker, entryDate, exitDate, tradeType='long'):
         """
         Record a closed trade for a strategy.
-        
-        Args:
-            strategyName: Name of strategy that initiated this trade
-            entryPrice: Price at trade entry
-            exitPrice: Price at trade exit
-            quantity: Number of shares traded
-            ticker: Stock ticker
-            entryDate: Trade entry date (YYYY-MM-DD)
-            exitDate: Trade exit date (YYYY-MM-DD)
-            tradeType: 'long' or 'short' for correct P&L calculation
         """
         with self._lock:
             if strategyName not in self._tradeHistory:
@@ -62,9 +48,9 @@ class PerformanceTracker:
             if strategyName in self._metricsCache:
                 del self._metricsCache[strategyName]
             allTradesCount = len(self._tradeHistory[strategyName])
-            allTradesPnL = sum((t['pnl'] for t in self._tradeHistory[strategyName]))
+            allTradesPnl = sum((t['pnl'] for t in self._tradeHistory[strategyName]))
             tradeSignature = f'{ticker}_{quantity}_{entryPrice:.2f}_{exitPrice:.2f}_{pnl:.2f}'
-            logger.info(f'[{strategyName}] Trade #{allTradesCount} [{tradeSignature}] recorded: {ticker} {quantity}@{entryPrice:.2f}->{exitPrice:.2f}, P&L ${pnl:.2f} | Total P&L all-time: ${allTradesPnL:.2f}')
+            logger.info(f'[{strategyName}] Trade #{allTradesCount} [{tradeSignature}] recorded: {ticker} {quantity}@{entryPrice:.2f}->{exitPrice:.2f}, P&L ${pnl:.2f} | Total P&L all-time: ${allTradesPnl:.2f}')
 
     def getProfitFactor(self, strategyName):
         """
@@ -100,37 +86,28 @@ class PerformanceTracker:
     def getMetrics(self, strategyName):
         """
         Get metrics for a strategy (cached, sliding window).
-        
-        Args:
-            strategyName: Name of the strategy
-            
-        Returns:
-            Dict with profitFactor, totalTrades, winCount, lossCount, avgWin, avgLoss, avgPnL, totalPnL
+        Returns a dict with profitFactor, totalTrades, winCount, lossCount, avgWin, avgLoss, avgPnL, totalPnL
         """
         with self._lock:
             if strategyName not in self._tradeHistory or not self._tradeHistory[strategyName]:
                 return {'profitFactor': 0.0, 'totalTrades': 0, 'winCount': 0, 'lossCount': 0, 'avgWin': 0.0, 'avgLoss': 0.0, 'avgPnL': 0.0, 'totalPnL': 0.0}
             allTrades = self._tradeHistory[strategyName]
-            allTradesPnL = sum((t['pnl'] for t in allTrades))
-            allWins = [t for t in allTrades if t['pnl'] > 0]
-            allLosses = [t for t in allTrades if t['pnl'] < 0]
+            allTradesPnl = sum((t['pnl'] for t in allTrades))
             recentTrades = allTrades[-self.windowSize:]
             wins = [t for t in recentTrades if t['pnl'] > 0]
             losses = [t for t in recentTrades if t['pnl'] < 0]
             totalProfit = sum((t['pnl'] for t in wins)) if wins else 0
             totalLoss = sum((t['pnl'] for t in losses)) if losses else 0
             metrics = {'profitFactor': self.getProfitFactor(strategyName), 'totalTrades': len(recentTrades), 'winCount': len(wins), 'lossCount': len(losses), 'avgWin': totalProfit / len(wins) if wins else 0.0, 'avgLoss': abs(totalLoss / len(losses)) if losses else 0.0, 'avgPnL': sum((t['pnl'] for t in recentTrades)) / len(recentTrades), 'totalPnL': sum((t['pnl'] for t in recentTrades))}
-            if metrics['totalPnL'] < 0.01 and allTradesPnL > 1.0:
-                logger.warning(f'[{strategyName}] METRICS MISMATCH: windowPnL=${metrics['totalPnL']:.2f} vs allTimePnL=${allTradesPnL:.2f} ({len(allTrades)} total trades, window={self.windowSize})')
+            if metrics['totalPnL'] < 0.01 and allTradesPnl > 1.0:
+                logger.warning(f'[{strategyName}] METRICS MISMATCH: windowPnL=${metrics['totalPnL']:.2f} vs allTimePnL=${allTradesPnl:.2f} ({len(allTrades)} total trades, window={self.windowSize})')
                 logger.warning(f'  Window trades: {len(recentTrades)}, Wins={len(wins)} (${totalProfit:.2f}), Losses={len(losses)} (${abs(totalLoss):.2f})')
             return metrics
 
     def getAllMetrics(self):
         """
         Get metrics for all tracked strategies.
-        
-        Returns:
-            Dict mapping strategy names to their metrics (from getMetrics())
+        Returns a dict mapping strategy names to their metrics (from getMetrics())
         """
         with self._lock:
             allMetrics = {}
@@ -140,16 +117,12 @@ class PerformanceTracker:
 
     def recordRecommendation(self, strategyName, action, ticker, priceAtRec, confidence, timestamp, mic):
         """
-        Record a strategy recommendation for quality assessment.
+        Record a strategy recommendation so it's quality can be checked later.
         
-        Args:
-            strategyName: Name of the strategy making the recommendation
-            action: Recommended action ('long', 'short', 'hold', 'sell')
-            ticker: Stock ticker symbol
-            priceAtRec: Price at time of recommendation
-            confidence: Confidence score (0.0-1.0)
-            timestamp: Recommendation timestamp (YYYY-MM-DD)
-            mic: Market Identifier Code
+        action is the recommended action, one of ('long', 'short', 'hold', 'sell')
+        priceAtRec is the price at time of recommendation.
+        confidence is between 0.0-1.0
+        timestamp is a (YYYY-MM-DD) str.
         """
         with self._lock:
             if strategyName not in self._recommendationHistory:
@@ -160,13 +133,11 @@ class PerformanceTracker:
     def scoreRecommendations(self, exchange, simDate, mic, thresholdPct=2.0):
         """
         Score HOLD recommendations against actual price movement.
-        Evaluates whether HOLD recommendations were correct based on subsequent price change.
+        Evaluates whether HOLD recommendations were correct based on price change seen.
         
-        Args:
-            exchange: StockExchange instance for price lookups
-            simDate: Current simulation date (YYYY-MM-DD)
-            mic: Market Identifier Code
-            thresholdPct: Price movement threshold (%) to classify recommendation outcome
+        exchange: StockExchange instance for price lookups
+        simDate as a date str.
+        thresholdPct is the price movement threshold (%) to classify recommendation outcome.
         """
         with self._lock:
             for strategyName, recommendations in self._recommendationHistory.items():
@@ -181,7 +152,7 @@ class PerformanceTracker:
                         currentPrice = exchange.getPrice(ticker, rec['mic'], simDate)
                         priceDelta = (currentPrice - recPrice) / recPrice * 100
                         if priceDelta > thresholdPct:
-                            rec['outcome'] = 'CORRECT'
+                            rec['outcome'] = 'MISSED_LONG'
                         elif priceDelta < -thresholdPct:
                             rec['outcome'] = 'MISSED_SHORT'
                         else:
@@ -192,12 +163,58 @@ class PerformanceTracker:
                         rec['outcome'] = 'PENDING'
                         logger.debug(f'Could not score {ticker} recommendation for {strategyName}: {e}')
 
+    def getScoredRecommendations(self, strategyName, simDate=None, actions=None):
+        """
+        Get scored recommendations for a strategy based on recommendation history.
+
+        strategyName: strategy name to filter by.
+        simDate is optional: YYYY-MM-DD str upper bound (inclusive) for recommendation date.
+        actions is optional: iterable of actions to include, e.g. ['hold'].
+
+        Returns a list of recommendation dicts with scored outcomes.
+        """
+        with self._lock:
+            recs = self._recommendationHistory.get(strategyName, [])
+            allowedActions = set(actions) if actions else None
+            scored = []
+            for rec in recs:
+                if rec.get('outcome') not in ('CORRECT', 'MISSED_LONG', 'MISSED_SHORT'):
+                    continue
+                if allowedActions and rec.get('action') not in allowedActions:
+                    continue
+                if simDate and rec.get('timestamp') and rec.get('timestamp') > simDate:
+                    continue
+                scored.append(rec)
+            return scored
+
+    def getAllRecommendations(self, limit=20):
+        """
+        Get recent recommendations across all strategies.
+
+        limit is the maximum number of recommendations to return (most recent first).
+
+        Returns a list of recommendation dicts with unified keys for GUI formatting.
+        """
+        with self._lock:
+            allRecs = []
+            for strategyName, recs in self._recommendationHistory.items():
+                for rec in recs:
+                    allRecs.append({
+                        'strategy': strategyName,
+                        'action': rec.get('action', 'hold'),
+                        'ticker': rec.get('ticker', ''),
+                        'confidence': rec.get('confidence', 0.0),
+                        'date': rec.get('timestamp', ''),
+                        'outcome': rec.get('outcome', 'PENDING')
+                    })
+            allRecs.sort(key=lambda r: r.get('date', ''), reverse=True)
+            return allRecs[:limit] if limit is not None else allRecs
+
     def getRecommendationMetrics(self, strategyName):
         """
         Get metrics for all recommendations from a strategy.
-        
         Returns:
-            Dict with:
+            a dict with:
             - totalRecommendations: Total recommendations made
             - holdCount: Number of HOLD recommendations
             - holdCorrect: Number of correct HOLD recommendations
@@ -211,10 +228,11 @@ class PerformanceTracker:
         """
         with self._lock:
             if strategyName not in self._recommendationHistory:
-                return {'totalRecommendations': 0, 'holdCount': 0, 'holdCorrect': 0, 'holdMissedLong': 0, 'holdMissedShort': 0, 'holdAccuracy': 0.0, 'longCount': 0, 'shortCount': 0, 'totalExecuted': 0, 'pendingCount': 0}
+                return {'totalRecommendations': 0, 'holdCount': 0, 'holdCorrect': 0, 'holdMissedLong': 0, 'holdMissedShort': 0, 'holdAccuracy': 0.0, 'longCount': 0, 'shortCount': 0, 'sellCount': 0, 'totalExecuted': 0, 'pendingCount': 0}
             recs = self._recommendationHistory[strategyName]
             longCount = sum((1 for r in recs if r['action'] == 'long'))
             shortCount = sum((1 for r in recs if r['action'] == 'short'))
+            sellCount = sum((1 for r in recs if r['action'] == 'sell'))
             holdRecs = [r for r in recs if r['action'] == 'hold']
             holdCorrect = sum((1 for r in holdRecs if r['outcome'] == 'CORRECT'))
             holdMissedLong = sum((1 for r in holdRecs if r['outcome'] == 'MISSED_LONG'))
@@ -222,4 +240,4 @@ class PerformanceTracker:
             pendingCount = sum((1 for r in holdRecs if r['outcome'] == 'PENDING'))
             scoredHolds = len(holdRecs) - pendingCount
             holdAccuracy = holdCorrect / scoredHolds if scoredHolds > 0 else 0.0
-            return {'totalRecommendations': len(recs), 'holdCount': len(holdRecs), 'holdCorrect': holdCorrect, 'holdMissedLong': holdMissedLong, 'holdMissedShort': holdMissedShort, 'holdAccuracy': holdAccuracy, 'longCount': longCount, 'shortCount': shortCount, 'totalExecuted': longCount + shortCount, 'pendingCount': pendingCount}
+            return {'totalRecommendations': len(recs), 'holdCount': len(holdRecs), 'holdCorrect': holdCorrect, 'holdMissedLong': holdMissedLong, 'holdMissedShort': holdMissedShort, 'holdAccuracy': holdAccuracy, 'longCount': longCount, 'shortCount': shortCount, 'sellCount': sellCount, 'totalExecuted': longCount + shortCount + sellCount, 'pendingCount': pendingCount}

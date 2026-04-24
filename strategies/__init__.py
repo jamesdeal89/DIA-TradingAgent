@@ -18,5 +18,5 @@ from .fundamentalStrategy import FundamentalStrategy
 from .sentimentStrategy import SentimentStrategy
 from .qLearningStrategy import DeepQLearningStrategy, StateBuilder
 from .lstmStrategy import LSTMStrategy
-from .sentimentAnalyser import analyseSentiment, SentimentAnalyser, filterBySentiment, filterByConfidence, summariseSentiment
-__all__ = ['TradingStrategy', 'MeanReversionStrategy', 'TechnicalStrategy', 'FundamentalStrategy', 'SentimentStrategy', 'DeepQLearningStrategy', 'StateBuilder', 'LSTMStrategy', 'analyseSentiment', 'SentimentAnalyser', 'filterBySentiment', 'filterByConfidence', 'summariseSentiment']
+from .sentimentAnalyser import SentimentAnalyser
+__all__ = ['TradingStrategy', 'MeanReversionStrategy', 'TechnicalStrategy', 'FundamentalStrategy', 'SentimentStrategy', 'DeepQLearningStrategy', 'StateBuilder', 'LSTMStrategy', 'SentimentAnalyser']

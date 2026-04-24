@@ -2,7 +2,6 @@
 Abstract base class for trading strategies.
 """
 from abc import ABC, abstractmethod
-from typing import Dict, Any
 
 class TradingStrategy(ABC):
     """
@@ -20,26 +19,17 @@ class TradingStrategy(ABC):
         """
         Analyse a stock and return a trade recommendation.
         
-        Args:
-            ticker: Stock ticker symbol (e.g., 'AAPL')
-            mic: Market Identifier Code (e.g., 'XNAS', 'XLON')
-            simDate: Current simulation date in YYYY-MM-DD format
-            exchange: StockExchange instance for data access
+        ticker: Stock ticker symbol (e.g., 'AAPL')
+        mic: Market Identifier Code (e.g., 'XNAS', 'XLON')
+        simDate: Current simulation date in YYYY-MM-DD format
+        exchange: StockExchange instance for data access
         
-        Returns:
+        Returns a dict:
             {
-                'action': 'long' | 'short' | 'sell' | 'hold',
-                'confidence': float [0.0, 1.0],
-                'reason': str (explanation of decision),
-                'targetQuantity': int (shares to trade if action != 'hold')
+                'action': 'long', 'short', 'sell', 'hold',
+                'confidence': 0.0 to 1.0,
+                'reason': string (explanation of decision),
+                'targetQuantity': int (shares to trade if action not 'hold')
             }
         """
         pass
-
-    def getName(self):
-        """Return strategy name."""
-        return self.name
-
-    def getVersion(self):
-        """Return strategy version."""
-        return self.version

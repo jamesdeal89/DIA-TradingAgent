@@ -1,14 +1,14 @@
+"""
+Streamlit-based GUI for agent initialisation.
+Features a chat-like interface for querying agents for performance and trade information.
+NOTE: stockNews.py should be run first to fill the DB with news data. 
+"""
 import streamlit as st
 import NLP as nlp
-import mysql.connector
-from mysql.connector import Error
-import os
 from dotenv import load_dotenv
-import json
 from datetime import datetime, timedelta
 import threading
 import time
-import uuid
 import logging
 from agent import Agent
 from stockExchange import StockExchange
@@ -34,134 +34,58 @@ def logSimulationFinalResults(accountId, agent, exchange, agentData=None, closur
     Log final simulation results to console using responseFormatter summaries.
     First closes all open positions to get true final P&L.
     
-    Args:
-        accountId: Account ID
-        agent: Agent instance
-        exchange: StockExchange instance
-        agentData: Optional agent metadata
-        closureDate: Optional specific date to use for position closure (defaults to agent.simDate)
+    agentData: Optional agent metadata
+    closureDate: Optional specific date to use for position closure (defaults to agent.simDate)
     """
     try:
         print(f'\nChecking for open positions before closing...')
         cursor = exchange.connection.cursor()
         cursor.execute('SELECT COUNT(*) FROM portfolios WHERE accountId = %s AND closed IS FALSE', (accountId,))
-        open_count_before = cursor.fetchone()[0]
-        print(f'Open positions before: {open_count_before}')
+        openCountBefore = cursor.fetchone()[0]
+        print(f'Open positions before: {openCountBefore}')
         cursor.execute('SELECT snapshotDate, cashBalance, portfolioValue, totalValue FROM portfolio_history WHERE accountId = %s ORDER BY snapshotDate DESC LIMIT 1', (accountId,))
-        portfolio_before = cursor.fetchone()
-        if portfolio_before:
-            print(f'Portfolio before close: Cash=${portfolio_before[1]:,.2f}, Holdings=${portfolio_before[2]:,.2f}, Total=${portfolio_before[3]:,.2f}')
+        portfolioBefore = cursor.fetchone()
+        if portfolioBefore:
+            print(f'Portfolio before close: Cash=${portfolioBefore[1]:,.2f}, Holdings=${portfolioBefore[2]:,.2f}, Total=${portfolioBefore[3]:,.2f}')
         cursor.close()
         closureDate = closureDate or agent.getSimDate()
         print(f'\nClosing all open positions at {closureDate}...')
-        positions_closed = exchange.closeAllOpenPositions(agent.accountId, closureDate, agent.agentId)
-        print(f'Closed {positions_closed} open position(s)')
-        if 'LSTM' in agent.getStrategies():
-            try:
-                logger.info(f'Agent {agent.agentId}: Starting LSTM training at episode end')
-                agent.getStrategies()['LSTM'].train(batchSize=32, epochs=1)
-                logger.info(f'Agent {agent.agentId}: LSTM training completed')
-            except Exception as e:
-                logger.error(f'LSTM training failed: {e}')
-        cursor = exchange.connection.cursor()
-        cursor.execute('SELECT COUNT(*) FROM portfolios WHERE accountId = %s AND closed IS FALSE', (accountId,))
-        open_count_after = cursor.fetchone()[0]
-        print(f'Open positions after: {open_count_after}')
-        if open_count_after > 0:
-            cursor.execute('SELECT ticker, tradeType, quantity FROM portfolios WHERE accountId = %s AND closed IS FALSE', (accountId,))
-            remaining = cursor.fetchall()
-            print(f'WARNING: Still have unclosed positions: {remaining}')
-        cursor.close()
-        print()
-        print(f'{'=' * 80}')
+        positionsClosed = exchange.closeAllOpenPositions(agent.accountId, closureDate, agent.agentId)
+        print(f'Closed {positionsClosed} open position(s)')
         print(f'SIMULATION FINAL RESULTS - Agent {accountId}')
-        print(f'{'=' * 80}')
         start_date = agentData.get('simDate') if agentData else 'Unknown'
         print(f'Simulation Date Range: {start_date} -> {agent.getSimDate()}')
         print(f'Decision Period: {agent.getDecisionPeriod()} days')
         print(f'Total Timesteps: {agent.getTimestepCounter()}')
         print(f'Total Trades: {agent.getTotalTrades()}')
-        print()
         try:
-            portfolio_history = exchange.getPortfolioHistory(agent.accountId)
-            if not portfolio_history.empty:
+            portfolioHistory = exchange.getPortfolioHistory(agent.accountId)
+            if not portfolioHistory.empty:
                 print('PORTFOLIO SUMMARY:')
-                latest = portfolio_history.iloc[-1]
+                latest = portfolioHistory.iloc[-1]
                 print(f'Final Cash Balance: ${latest['cashBalance']:,.2f}')
                 print(f'Final Portfolio Value: ${latest['portfolioValue']:,.2f}')
-                print(f'Final Total Value: ${latest['totalValue']:,.2f}')
-                print()
+                print(f'Final Total Value: ${latest['totalValue']:,.2f}\n')
             else:
                 print('PORTFOLIO SUMMARY: No portfolio history available.')
-                print()
         except Exception as e:
-            print(f'Note: Could not retrieve portfolio summary: {e}')
-            print()
+            print(f'Note: Could not retrieve portfolio summary: {e}\n')
         try:
             print('STRATEGY PERFORMANCE:')
             print(ResponseFormatter.formatStrategyComparison(agent.getPerformanceTracker(), agent.getExecutionLog()))
-            print()
         except Exception as e:
             print(f'Note: Could not format strategy comparison: {e}')
-            print()
-        try:
-            print('[DEBUG] DETAILED TRADE HISTORY FROM PERFORMANCE TRACKER:')
-            total_trades_recorded = 0
-            performanceTracker = agent.getPerformanceTracker()
-            if hasattr(performanceTracker, '_tradeHistory'):
-                for strategy_name in sorted(performanceTracker._tradeHistory.keys()):
-                    trades = performanceTracker._tradeHistory[strategy_name]
-                    if trades:
-                        total_trades_recorded += len(trades)
-                        print(f'\n{strategy_name}: {len(trades)} total trades')
-                        for i, trade in enumerate(trades):
-                            print(f'  {i + 1}. {trade['ticker']:6s} {trade['quantity']:4d}@${trade['entryPrice']:8.2f} -> ${trade['exitPrice']:8.2f} = ${trade['pnl']:10.2f}')
-                        total_pnl = sum((t['pnl'] for t in trades))
-                        print(f'  TOTAL P&L: ${total_pnl:,.2f}')
-            print(f'\nTOTAL TRADES RECORDED: {total_trades_recorded}')
-            print(f'TOTAL TRADES PLACED (from log): {agent.getTotalTrades()}')
-            print(f'MISSING TRADES: {agent.getTotalTrades() - total_trades_recorded}')
-            print()
-        except Exception as e:
-            print(f'[DEBUG] Could not print trade history: {e}\n')
         try:
             print('HOLD RECOMMENDATION ANALYSIS:')
             recommendationMetrics = {}
             strategies = agent.getStrategies()
             for strategyName in strategies.keys():
                 recommendationMetrics[strategyName] = agent.getPerformanceTracker().getRecommendationMetrics(strategyName)
-            hold_analysis = ResponseFormatter.formatRecommendationQuality(recommendationMetrics)
-            print(hold_analysis)
-            print()
+            holdAnalysis = ResponseFormatter.formatRecommendationQuality(recommendationMetrics)
+            print(holdAnalysis)
         except Exception as e:
             print(f'Note: Could not retrieve HOLD analysis: {e}')
-            print()
-        try:
-            print('RECENTLY CLOSED TRADES AT SIMULATION END:')
-            closed_trades = exchange.getClosedTradesPnL(agent.accountId)
-            if closed_trades:
-                sorted_trades = sorted(closed_trades, key=lambda x: x.get('exitDate', ''), reverse=True)[:10]
-                print(f'Total closed trades in DB: {len(closed_trades)}')
-                print(f'Showing last 10 closed trades:')
-                for trade in sorted_trades:
-                    ticker = trade.get('ticker', 'N/A')
-                    trade_type = trade.get('tradeType', 'N/A')
-                    entry = trade.get('entryPrice', 0)
-                    exit_price = trade.get('exitPrice', 0)
-                    pnl = trade.get('pnl', 0)
-                    pnl_pct = trade.get('pnlPercent', 0)
-                    exit_date = trade.get('exitDate', 'N/A')
-                    print(f'  {ticker:6s} {trade_type:6s} | Entry ${entry:7.2f} -> Exit ${exit_price:7.2f} | P&L ${pnl:8.2f} ({pnl_pct:6.1f}%) | {exit_date}')
-                print()
-            else:
-                print('No closed trades recorded.')
-                print()
-        except Exception as e:
-            print(f'Note: Could not retrieve closed trades: {e}')
-            print()
-        print(f'{'=' * 80}')
         print(f'Simulation complete. Results saved to database.')
-        print(f'{'=' * 80}\n')
     except Exception as e:
         print(f'Error logging final results: {e}')
 
@@ -171,7 +95,7 @@ def runAgentTradeLoop(accountId, agentData, exchange):
     All strategy logic handled within agent.runTimestep().
     """
     mic = agentData.get('mic', 'XNAS')
-    timestep_count = 0
+    timestepCount = 0
     print(f'DEBUG: Trade loop started for agent {accountId} on {mic}')
     maxNewsDate = exchange.getMaxNewsDate()
     todayDate = datetime.now().strftime('%Y-%m-%d')
@@ -193,15 +117,8 @@ def runAgentTradeLoop(accountId, agentData, exchange):
                 decisionPeriod = agent.getDecisionPeriod()
                 nextDate = (currentDate + timedelta(days=decisionPeriod)).strftime('%Y-%m-%d')
                 nextDateTime = datetime.strptime(nextDate, '%Y-%m-%d')
-                willExceedBoundary = False
                 if endDate:
                     endDateTime = datetime.strptime(endDate, '%Y-%m-%d')
-                    if nextDateTime > endDateTime:
-                        willExceedBoundary = True
-                elif maxNewsDate and nextDate > maxNewsDate:
-                    willExceedBoundary = True
-                elif nextDate >= todayDate:
-                    willExceedBoundary = True
                 if endDate:
                     endDateTime = datetime.strptime(endDate, '%Y-%m-%d')
                     if currentDate > endDateTime:
@@ -218,7 +135,7 @@ def runAgentTradeLoop(accountId, agentData, exchange):
                     print(f'DEBUG: Agent {accountId} simulation ended at {simDate}.')
                     logSimulationFinalResults(accountId, agent, exchange, agentData, lastValidSimDate)
                     break
-            print(f'DEBUG: Agent {accountId} timestep {timestep_count} on {simDate}')
+            print(f'DEBUG: Agent {accountId} timestep {timestepCount} on {simDate}')
             agent.runTimestep(exchange, simDate)
             if not isRealtimeMode:
                 decisionPeriod = agent.getDecisionPeriod()
@@ -238,14 +155,17 @@ def runAgentTradeLoop(accountId, agentData, exchange):
                 elif endDate:
                     agentData['threadRunning'] = False
                     logSimulationFinalResults(accountId, agent, exchange, agentData, simDate)
-            timestep_count += 1
+            timestepCount += 1
         except Exception as e:
             print(f'DEBUG: Agent {accountId} timestep error - {e}')
+        
+        # Use sleep to mitigate Yahoo Finance rate-limiting issue.
         if isRealtimeMode:
-            sleep_seconds = 5.0
+            sleepSeconds = 5.0
         else:
-            sleep_seconds = 2.0
-        time.sleep(sleep_seconds)
+            sleepSeconds = 2.0
+        time.sleep(sleepSeconds)
+
     print(f'DEBUG: Trade loop ended for agent {accountId}')
 
 def startAgent(mic, prefStrategy, bannedList, simDate=None, endDate=None, decisionPeriod=1, isRealtimeMode=False, config=None):
@@ -253,6 +173,7 @@ def startAgent(mic, prefStrategy, bannedList, simDate=None, endDate=None, decisi
     try:
         if 'activeAgents' not in st.session_state:
             st.session_state.activeAgents = {}
+        # Use current system time to ensure unique agent IDs.
         accountId = int(time.time() * 1000000) % 1000000000
         exchange.initialiseAccount(accountId)
         preferred = prefStrategy if prefStrategy and prefStrategy != 'None' else None
@@ -309,12 +230,12 @@ def chatGUI():
             else:
                 with st.container(border=True):
                     st.caption('Historical Simulation Settings')
-                    col_start, col_end = st.columns(2)
-                    with col_start:
-                        simDate = st.date_input('Start date', value=datetime(2010, 1, 1), min_value=datetime(1990, 1, 1), max_value=datetime.now(), key='sim_start')
-                    with col_end:
-                        endDate = st.date_input('End date (optional)', value=datetime(2020, 1, 1), min_value=datetime(1990, 1, 1), max_value=datetime.now(), key='sim_end')
-            decisionPeriod = st.slider('Decision period (days)', min_value=1, max_value=60, value=1, step=1, help='Make trading decisions every N days instead of daily. Helps reduce noise by analyzing larger time windows.')
+                    colStart, colEnd = st.columns(2)
+                    with colStart:
+                        simDate = st.date_input('Start date', value=datetime(2010, 1, 1), min_value=datetime(1990, 1, 1), max_value=datetime.now(), key='simStart')
+                    with colEnd:
+                        endDate = st.date_input('End date (optional)', value=datetime(2020, 1, 1), min_value=datetime(1990, 1, 1), max_value=datetime.now(), key='simEnd')
+            decisionPeriod = st.slider('Decision period (days)', min_value=1, max_value=60, value=1, step=1, help='Make trading decisions every N days instead of daily. Helps reduce noise by analysing larger time windows.')
             with st.expander('Strategy Selection Configuration', expanded=False):
                 config = {'selectorEpsilon': 0.3, 'minTradesBeforeMetrics': 10}
                 config['selectorEpsilon'] = st.slider('Strategy Selector Epsilon', min_value=0.0, max_value=1.0, value=config['selectorEpsilon'], step=0.05, help='Probability of exploring random strategy (vs using best performer)')
@@ -324,8 +245,8 @@ def chatGUI():
                 endDateStr = endDate.strftime('%Y-%m-%d') if endDate and (not isinstance(endDate, str)) else endDate if endDate else None
                 accountId = startAgent(mic, prefStrategy, banned, simDateStr, endDateStr, decisionPeriod, isRealtimeMode, config)
                 if accountId:
-                    mode_display = 'realtime' if isRealtimeMode else 'historical'
-                    st.success(f'Agent created with account ID: {accountId} (mode: {mode_display}, decision period: {decisionPeriod}d)')
+                    modeDisplay = 'realtime' if isRealtimeMode else 'historical'
+                    st.success(f'Agent created with account ID: {accountId} (mode: {modeDisplay}, decision period: {decisionPeriod}d)')
                     st.rerun()
                 else:
                     st.error('Failed to create agent')
@@ -392,19 +313,19 @@ def chatGUI():
                     agentData = st.session_state.activeAgents.get(aId)
                     if agentData:
                         agent = agentData['agent']
-                        chart_data = ResponseFormatter.formatPerformanceChartData(agent.getPerformanceTracker(), exchange, agent.accountId)
-                        if chart_data['hasData']:
-                            if chart_data['portfolioValue']:
+                        chartData = ResponseFormatter.formatPerformanceChartData(agent.getPerformanceTracker(), exchange, agent.accountId)
+                        if chartData['hasData']:
+                            if chartData['portfolioValue']:
                                 import pandas as pd
-                                portfolio_df = pd.DataFrame([{'Date': k, 'Portfolio Value': v} for k, v in chart_data['portfolioValue'].items()])
-                                st.line_chart(portfolio_df.set_index('Date'))
+                                portfolioDf = pd.DataFrame([{'Date': k, 'Portfolio Value': v} for k, v in chartData['portfolioValue'].items()])
+                                st.line_chart(portfolioDf.set_index('Date'))
                                 st.caption('Portfolio Value Over Time')
-                            if chart_data['strategyPnL']:
+                            if chartData['strategyPnL']:
                                 st.markdown('#### Strategy-Specific Cumulative P&L')
                                 import pandas as pd
-                                for strategy, pnl_dict in chart_data['strategyPnL'].items():
-                                    strategy_df = pd.DataFrame([{'Date': k, 'Cumulative P&L': v} for k, v in pnl_dict.items()])
-                                    st.line_chart(strategy_df.set_index('Date'))
+                                for strategy, pnlDict in chartData['strategyPnL'].items():
+                                    strategyDf = pd.DataFrame([{'Date': k, 'Cumulative P&L': v} for k, v in pnlDict.items()])
+                                    st.line_chart(strategyDf.set_index('Date'))
                                     st.caption(f'{strategy}')
         if (prompt := st.chat_input('Enter your prompt...')):
             with st.chat_message('user'):
@@ -420,21 +341,21 @@ def chatGUI():
                     agent = agentData['agent']
                     if intentLabel == 'performance':
                         st.markdown('### Performance Metrics')
-                        chart_data = ResponseFormatter.formatPerformanceChartData(agent.getPerformanceTracker(), exchange, agent.accountId)
-                        performance_summary = f'Performance data retrieved at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}'
-                        st.session_state[messagesKey].append({'role': 'ai', 'content': performance_summary, 'type': 'performance'})
-                        if chart_data['hasData']:
-                            if chart_data['portfolioValue']:
+                        chartData = ResponseFormatter.formatPerformanceChartData(agent.getPerformanceTracker(), exchange, agent.accountId)
+                        performanceSummary = f'Performance data retrieved at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}'
+                        st.session_state[messagesKey].append({'role': 'ai', 'content': performanceSummary, 'type': 'performance'})
+                        if chartData['hasData']:
+                            if chartData['portfolioValue']:
                                 import pandas as pd
-                                portfolio_df = pd.DataFrame([{'Date': k, 'Portfolio Value': v} for k, v in chart_data['portfolioValue'].items()])
-                                st.line_chart(portfolio_df.set_index('Date'))
+                                portfolioDf = pd.DataFrame([{'Date': k, 'Portfolio Value': v} for k, v in chartData['portfolioValue'].items()])
+                                st.line_chart(portfolioDf.set_index('Date'))
                                 st.caption('Portfolio Value Over Time')
-                            if chart_data['strategyPnL']:
+                            if chartData['strategyPnL']:
                                 st.markdown('#### Strategy-Specific Cumulative P&L')
                                 import pandas as pd
-                                for strategy, pnl_dict in chart_data['strategyPnL'].items():
-                                    strategy_df = pd.DataFrame([{'Date': k, 'Cumulative P&L': v} for k, v in pnl_dict.items()])
-                                    st.line_chart(strategy_df.set_index('Date'))
+                                for strategy, pnlDict in chartData['strategyPnL'].items():
+                                    strategyDf = pd.DataFrame([{'Date': k, 'Cumulative P&L': v} for k, v in pnlDict.items()])
+                                    st.line_chart(strategyDf.set_index('Date'))
                                     st.caption(f'{strategy}')
                         else:
                             st.info('No performance data yet. Run the simulation to generate trading results.')
@@ -450,8 +371,9 @@ def chatGUI():
                             st.markdown(response)
                         st.session_state[messagesKey].append({'role': 'ai', 'content': response})
                     elif intentLabel == 'portfolio':
+                        simDate = agent.getSimDate()
+                        portfolio = exchange.checkPortfolio(agent.accountId, simDate)
                         balance = exchange.checkBalance(agent.accountId) or 0
-                        portfolio = exchange.checkPortfolio(agent.accountId, agent.getSimDate())
                         portfolioDict = {}
                         if portfolio is not None and (not portfolio.empty):
                             for _, row in portfolio.iterrows():
@@ -462,25 +384,25 @@ def chatGUI():
                                     if ticker not in portfolioDict:
                                         portfolioDict[ticker] = {'mic': mic}
                                     if tradeType == 'long':
-                                        entry_price = row.get('entryPrice', 0)
+                                        entryPrice = row.get('entryPrice', 0)
                                         qty = row.get('quantity', 0)
                                         try:
-                                            current_price = exchange.getPrice(ticker, mic, agent.getSimDate())
+                                            currentPrice = exchange.getPrice(ticker, mic, agent.getSimDate())
                                         except ValueError:
-                                            current_price = entry_price
+                                            currentPrice = entryPrice
                                         portfolioDict[ticker]['long'] = qty
-                                        portfolioDict[ticker]['longEntryPrice'] = entry_price
-                                        portfolioDict[ticker]['longCurrentPrice'] = current_price
+                                        portfolioDict[ticker]['longEntryPrice'] = entryPrice
+                                        portfolioDict[ticker]['longCurrentPrice'] = currentPrice
                                     elif tradeType == 'short':
-                                        entry_price = row.get('priceAtShort', 0)
+                                        entryPrice = row.get('priceAtShort', 0)
                                         qty = row.get('quantity', 0)
                                         try:
-                                            current_price = exchange.getPrice(ticker, mic, agent.getSimDate())
+                                            currentPrice = exchange.getPrice(ticker, mic, agent.getSimDate())
                                         except ValueError:
-                                            current_price = entry_price
+                                            currentPrice = entryPrice
                                         portfolioDict[ticker]['short'] = qty
-                                        portfolioDict[ticker]['shortEntryPrice'] = entry_price
-                                        portfolioDict[ticker]['shortCurrentPrice'] = current_price
+                                        portfolioDict[ticker]['shortEntryPrice'] = entryPrice
+                                        portfolioDict[ticker]['shortCurrentPrice'] = currentPrice
                         response = ResponseFormatter.formatPortfolioSummary(portfolioDict, balance)
                         with st.chat_message('assistant'):
                             st.markdown(response)

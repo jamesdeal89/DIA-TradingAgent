@@ -1,20 +1,18 @@
 """
-Deep Q-Learning Trading Strategy.
+Deep Q-Learning Trading Strategy with MLP.
 
-Uses a neural network to learn optimal trading decisions based on a multi-dimensional state:
+Uses a neural network to learn optimal trading decisions based on a large market state snapshot:
 - Sentiment score (from sentiment analyser)
 - Technical indicators (RSI, MACD, Bollinger Bands)
 - Price performance metrics (volatility, momentum, trend)
-- Market microstructure features
+- Market conditions (volume trend, acceleration)
 
-The agent learns Q-values: Q(state, action) -> value
-Actions: LONG (buy), SHORT (sell), HOLD (no trade)
+The agent learns Q-values: Q(state, action) -> value.
 """
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from typing import Dict, List, Any, Optional, Tuple
 from collections import deque
 import random
 import logging
@@ -24,47 +22,45 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class DQNNetwork(nn.Module):
-    """Neural network mapping state to Q-values."""
+    """MLP mapping state to Q-values."""
 
-    def __init__(self, state_size, action_size=4, hidden_size=128):
+    def __init__(self, stateSize, actionSize=4, hiddenSize=128):
         """Initialise network with given state and action sizes."""
         super(DQNNetwork, self).__init__()
-        self.state_size = state_size
-        self.action_size = action_size
-        self.fc1 = nn.Linear(state_size, hidden_size)
-        self.fc2 = nn.Linear(hidden_size, hidden_size)
-        self.fc3 = nn.Linear(hidden_size, action_size)
+        self.stateSize = stateSize
+        self.actionSize = actionSize
+        self.fc1 = nn.Linear(stateSize, hiddenSize)
+        self.fc2 = nn.Linear(hiddenSize, hiddenSize)
+        self.fc3 = nn.Linear(hiddenSize, actionSize)
         self.relu = nn.ReLU()
 
     def forward(self, state):
         """Forward pass returning Q-values for each action."""
         x = self.relu(self.fc1(state))
         x = self.relu(self.fc2(x))
-        q_values = self.fc3(x)
-        return q_values
+        qValues = self.fc3(x)
+        return qValues
 
 class StateBuilder:
-    """Builds state vectors from market data (sentiment, technical, price, volume features)."""
-    STATE_SIZE = 12
+    """Builds state vectors from market data."""
+    STATE_SIZE = 10
 
     @staticmethod
     def buildState(ticker, mic, simDate, exchange, analysisPeriod=1, sentimentAnalyser=None):
-        """Build normalized state vector for a stock."""
+        """Build normalised state vector for a stock."""
         state = []
         try:
-            sentiment_score = StateBuilder._getSentimentFeature(ticker, mic, simDate, exchange, sentimentAnalyser)
-            state.append(sentiment_score)
-            rsi, macd, bbPosition = StateBuilder._getTechnicalFeatures(ticker, mic, simDate, exchange, analysisPeriod)
+            sentimentScore = StateBuilder.getSentimentFeature(ticker, mic, simDate, exchange, sentimentAnalyser)
+            state.append(sentimentScore)
+            rsi, macd, bbPosition = StateBuilder.getTechnicalFeatures(ticker, mic, simDate, exchange, analysisPeriod)
             state.extend([rsi, macd, bbPosition])
-            momentum, volatility, trend = StateBuilder._getPricePerformanceFeatures(ticker, mic, simDate, exchange, analysisPeriod)
+            momentum, volatility, trend = StateBuilder.getPricePerformanceFeatures(ticker, mic, simDate, exchange, analysisPeriod)
             state.extend([momentum, volatility, trend])
-            volume_trend, price_level, extra_feature = StateBuilder._getMarketFeatures(ticker, mic, simDate, exchange)
-            state.extend([volume_trend, price_level, extra_feature])
+            volumeTrend, priceLevel, extraFeature = StateBuilder.getMarketFeatures(ticker, mic, simDate, exchange)
+            state.extend([volumeTrend, priceLevel, extraFeature])
             state = np.array(state, dtype=np.float32)
-            if len(state) < StateBuilder.STATE_SIZE:
-                state = np.pad(state, (0, StateBuilder.STATE_SIZE - len(state)), mode='constant', constant_values=0.0)
-            elif len(state) > StateBuilder.STATE_SIZE:
-                state = state[:StateBuilder.STATE_SIZE]
+            if len(state) != StateBuilder.STATE_SIZE:
+                raise ValueError(f'Expected {StateBuilder.STATE_SIZE} features, got {len(state)}')
             state = np.clip(state, -1.0, 1.0)
             return state
         except Exception as e:
@@ -72,8 +68,8 @@ class StateBuilder:
             return np.zeros(StateBuilder.STATE_SIZE, dtype=np.float32)
 
     @staticmethod
-    def _getSentimentFeature(ticker, mic, simDate, exchange, sentimentAnalyser):
-        """Fetch and normalize sentiment score from news headlines."""
+    def getSentimentFeature(ticker, mic, simDate, exchange, sentimentAnalyser):
+        """Fetch and normalise sentiment score from news headlines."""
         if sentimentAnalyser is None or exchange is None:
             return 0.0
         try:
@@ -88,26 +84,26 @@ class StateBuilder:
             return 0.0
 
     @staticmethod
-    def _getTechnicalFeatures(ticker, mic, simDate, exchange, analysisPeriod=1):
+    def getTechnicalFeatures(ticker, mic, simDate, exchange, analysisPeriod=1):
         """Compute RSI, MACD, and Bollinger Band position."""
         try:
             from datetime import datetime, timedelta
-            end_date = datetime.strptime(simDate, '%Y-%m-%d')
-            lookback_days = max(60, analysisPeriod * 2)
-            start_date = end_date - timedelta(days=lookback_days)
-            data = exchange.getStockData(ticker, mic=mic, start=start_date.strftime('%Y-%m-%d'), end=simDate)
-            if data is None or len(data) < 14:
+            endDate = datetime.strptime(simDate, '%Y-%m-%d')
+            lookbackDays = max(60, analysisPeriod * 2)
+            startDate = endDate - timedelta(days=lookbackDays)
+            data = exchange.getStockData(ticker, mic=mic, start=startDate.strftime('%Y-%m-%d'), end=simDate)
+            prices = StateBuilder.extractNumericSeries(data, 'Close', minLength=14)
+            if prices is None:
                 return (0.0, 0.0, 0.0)
-            prices = data['Close'].values
-            rsi_period = max(14, analysisPeriod // 2)
-            rsi = StateBuilder._calculateRsi(prices, period=rsi_period)
+            rsiPeriod = max(14, analysisPeriod // 2)
+            rsi = StateBuilder.calculateRsi(prices, period=rsiPeriod)
             rsiNorm = (rsi - 50) / 50
-            macd_fast = max(12, analysisPeriod // 2)
-            macd_slow = max(26, analysisPeriod)
-            macd, signal = StateBuilder._calculateMacd(prices, fast=macd_fast, slow=macd_slow, signal=9)
+            macdFast = max(12, analysisPeriod // 2)
+            macdSlow = max(26, analysisPeriod)
+            macd, signal = StateBuilder.calculateMacd(prices, fast=macdFast, slow=macdSlow, signal=9)
             macdDiff = macd - signal if macd is not None and signal is not None else 0.0
             macdNorm = np.clip(macdDiff / 100, -1.0, 1.0)
-            bbPos = StateBuilder._calculateBollingerBandPosition(prices, period=max(20, analysisPeriod))
+            bbPos = StateBuilder.calculateBollingerBandPosition(prices, period=max(20, analysisPeriod))
             bbNorm = (bbPos - 0.5) * 2
             return (float(rsiNorm), float(macdNorm), float(bbNorm))
         except Exception as e:
@@ -115,26 +111,28 @@ class StateBuilder:
             return (0.0, 0.0, 0.0)
 
     @staticmethod
-    def _getPricePerformanceFeatures(ticker, mic, simDate, exchange, analysisPeriod=1):
+    def getPricePerformanceFeatures(ticker, mic, simDate, exchange, analysisPeriod=1):
         """Compute momentum, volatility, and trend features."""
         try:
             from datetime import datetime, timedelta
-            end_date = datetime.strptime(simDate, '%Y-%m-%d')
-            lookback_days = max(60, analysisPeriod * 2)
-            start_date = end_date - timedelta(days=lookback_days)
-            prices_df = exchange.getStockData(ticker, mic=mic, start=start_date.strftime('%Y-%m-%d'), end=simDate)
-            if prices_df is None or len(prices_df) < 2:
+            endDate = datetime.strptime(simDate, '%Y-%m-%d')
+            lookbackDays = max(60, analysisPeriod * 2)
+            startDate = endDate - timedelta(days=lookbackDays)
+            pricesDf = exchange.getStockData(ticker, mic=mic, start=startDate.strftime('%Y-%m-%d'), end=simDate)
+            prices = StateBuilder.extractNumericSeries(pricesDf, 'Close', minLength=2)
+            if prices is None:
                 return (0.0, 0.0, 0.0)
-            prices = prices_df['Close'].values
-            momentum_window = max(20, min(analysisPeriod, len(prices)))
-            momentum = (prices[-1] - np.mean(prices[-momentum_window:])) / prices[-1] if prices[-1] != 0 else 0.0
+            momentumWindow = max(20, min(analysisPeriod, len(prices)))
+            momentum = (prices[-1] - np.mean(prices[-momentumWindow:])) / prices[-1] if prices[-1] != 0 else 0.0
             momentum = np.clip(momentum, -1.0, 1.0)
-            vol_window = max(20, min(analysisPeriod, len(prices)))
-            volatility = np.std(prices[-vol_window:]) / np.mean(prices[-vol_window:]) if np.mean(prices[-vol_window:]) != 0 else 0.0
+            volWindow = max(20, min(analysisPeriod, len(prices)))
+            volatility = np.std(prices[-volWindow:]) / np.mean(prices[-volWindow:]) if np.mean(prices[-volWindow:]) != 0 else 0.0
             volatility = np.clip(volatility / 0.1, -1.0, 1.0)
-            trend_window = max(10, min(analysisPeriod, len(prices)))
-            x = np.arange(trend_window)
-            y = prices[-trend_window:]
+            trendWindow = max(10, min(analysisPeriod, len(prices)))
+            if trendWindow < 2:
+                return (float(momentum), float(volatility), 0.0)
+            x = np.arange(trendWindow)
+            y = prices[-trendWindow:]
             z = np.polyfit(x, y, 1)
             trend = np.clip(z[0] / prices[-1], -1.0, 1.0)
             return (float(momentum), float(volatility), float(trend))
@@ -143,64 +141,86 @@ class StateBuilder:
             return (0.0, 0.0, 0.0)
 
     @staticmethod
-    def _getMarketFeatures(ticker, mic, simDate, exchange):
+    def getMarketFeatures(ticker, mic, simDate, exchange):
         """Compute volume trend, price level, and price acceleration."""
         try:
-            data = exchange.getStockData(ticker, mic=mic, period='1mo')
-            if data is None or len(data) < 1:
+            endDate = datetime.strptime(simDate, '%Y-%m-%d')
+            monthStart = (endDate - timedelta(days=35)).strftime('%Y-%m-%d')
+            yearStart = (endDate - timedelta(days=370)).strftime('%Y-%m-%d')
+            data = exchange.getStockData(ticker, mic=mic, start=monthStart, end=simDate)
+            volumes = StateBuilder.extractNumericSeries(data, 'Volume', minLength=1)
+            if volumes is None:
                 return (0.0, 0.0, 0.0)
-            volumes = data['Volume'].values
-            vol_trend = (volumes[-1] - np.mean(volumes[:-1])) / np.mean(volumes[:-1]) if np.mean(volumes[:-1]) != 0 else 0.0
-            vol_trend = np.clip(vol_trend, -1.0, 1.0)
-            price_year = exchange.getStockData(ticker, mic=mic, period='1y')
-            price_level = 0.0
-            price_accel = 0.0
-            if price_year is not None:
+            histMean = np.mean(volumes[:-1]) if len(volumes) > 1 else volumes[-1]
+            volTrend = (volumes[-1] - histMean) / histMean if histMean != 0 else 0.0
+            volTrend = np.clip(volTrend, -1.0, 1.0)
+            priceYear = exchange.getStockData(ticker, mic=mic, start=yearStart, end=simDate)
+            priceLevel = 0.0
+            priceAccel = 0.0
+            pricesYear = StateBuilder.extractNumericSeries(priceYear, 'Close', minLength=1)
+            if pricesYear is not None:
                 try:
-                    if len(price_year) > 0:
-                        prices_year = price_year['Close'].values
-                        price_level = (prices_year[-1] - np.min(prices_year)) / (np.max(prices_year) - np.min(prices_year)) if np.max(prices_year) != np.min(prices_year) else 0.5
-                        price_level = (price_level - 0.5) * 2
-                        if len(prices_year) > 2:
-                            returns = np.diff(prices_year) / prices_year[:-1]
-                            accel = np.diff(returns)
-                            price_accel = np.clip(np.mean(accel[-10:]) * 100, -1.0, 1.0) if len(accel) > 0 else 0.0
+                    priceLevel = (pricesYear[-1] - np.min(pricesYear)) / (np.max(pricesYear) - np.min(pricesYear)) if np.max(pricesYear) != np.min(pricesYear) else 0.5
+                    priceLevel = (priceLevel - 0.5) * 2
+                    if len(pricesYear) > 2:
+                        returns = np.diff(pricesYear) / pricesYear[:-1]
+                        accel = np.diff(returns)
+                        priceAccel = np.clip(np.mean(accel[-10:]) * 100, -1.0, 1.0) if len(accel) > 0 else 0.0
                 except (ValueError, TypeError):
                     pass
-            return (float(vol_trend), float(price_level), float(price_accel))
+            return (float(volTrend), float(priceLevel), float(priceAccel))
         except Exception as e:
             logger.warning(f'Error computing market features: {e}')
             return (0.0, 0.0, 0.0)
 
     @staticmethod
-    def _calculateRsi(prices, period=14):
+    def extractNumericSeries(data, columnName, minLength=1):
+        """Safely extract a numeric series from dataframes."""
+        if data is None:
+            return None
+        try:
+            if columnName not in data.columns:
+                return None
+            series = data[columnName]
+            if series is None:
+                return None
+            values = np.asarray(series.values, dtype=np.float32)
+            values = values[np.isfinite(values)]
+            if len(values) < minLength:
+                return None
+            return values
+        except Exception:
+            return None
+
+    @staticmethod
+    def calculateRsi(prices, period=14):
         """Calculate RSI."""
         if len(prices) < period + 1:
             return 50.0
         deltas = np.diff(prices)
         gains = np.where(deltas > 0, deltas, 0)
         losses = np.where(deltas < 0, -deltas, 0)
-        avg_gain = np.mean(gains[-period:])
-        avg_loss = np.mean(losses[-period:])
-        if avg_loss == 0:
-            return 100.0 if avg_gain > 0 else 50.0
-        rs = avg_gain / avg_loss
+        avgGain = np.mean(gains[-period:])
+        avgLoss = np.mean(losses[-period:])
+        if avgLoss == 0:
+            return 100.0 if avgGain > 0 else 50.0
+        rs = avgGain / avgLoss
         rsi = 100 - 100 / (1 + rs)
         return float(rsi)
 
     @staticmethod
-    def _calculateMacd(prices, fast=12, slow=26, signal=9):
+    def calculateMacd(prices, fast=12, slow=26, signal=9):
         """Calculate MACD."""
         if len(prices) < slow:
             return (None, None)
-        ema_fast = StateBuilder._calculateEMA(prices, fast)
-        ema_slow = StateBuilder._calculateEMA(prices, slow)
-        macd = ema_fast - ema_slow
-        signal_line = StateBuilder._calculateEMA(np.array([macd] * signal), signal)
-        return (float(macd), float(signal_line))
+        emaFast = StateBuilder.calculateEma(prices, fast)
+        emaSlow = StateBuilder.calculateEma(prices, slow)
+        macd = emaFast - emaSlow
+        signalLine = StateBuilder.calculateEma(np.array([macd] * signal), signal)
+        return (float(macd), float(signalLine))
 
     @staticmethod
-    def _calculateEMA(prices, period):
+    def calculateEma(prices, period):
         """Calculate EMA."""
         multiplier = 2 / (period + 1)
         ema = prices[0]
@@ -209,7 +229,7 @@ class StateBuilder:
         return ema
 
     @staticmethod
-    def _calculateBollingerBandPosition(prices, period=20):
+    def calculateBollingerBandPosition(prices, period=20):
         """Calculate Bollinger Band position (0-1)."""
         if len(prices) < period:
             return 0.5
@@ -217,8 +237,8 @@ class StateBuilder:
         std = np.std(prices[-period:])
         if std == 0:
             return 0.5
-        bb_pos = (prices[-1] - (sma - 2 * std)) / (4 * std)
-        return float(np.clip(bb_pos, 0.0, 1.0))
+        bbPos = (prices[-1] - (sma - 2 * std)) / (4 * std)
+        return float(np.clip(bbPos, 0.0, 1.0))
 
 class DeepQLearningStrategy(TradingStrategy):
     """Deep Q-Learning strategy: learns optimal trading actions via neural network."""
@@ -228,85 +248,65 @@ class DeepQLearningStrategy(TradingStrategy):
     ACTION_SELL = 3
     ACTION_MAP = {0: 'long', 1: 'short', 2: 'hold', 3: 'sell'}
 
-    def __init__(self, learning_rate=0.001, gamma=0.99, epsilon=0.1, model_path=None):
+    def __init__(self, learningRate=0.001, gamma=0.99, epsilon=0.1, modelPath=None):
         """Initialise Deep Q-Learning strategy."""
         super().__init__(name='DeepQLearning', version='1.0')
-        self.learning_rate = learning_rate
+        self.learningRate = learningRate
         self.gamma = gamma
         self.epsilon = epsilon
-        self.state_size = StateBuilder.STATE_SIZE
-        self.action_size = 4
-        self.network = DQNNetwork(self.state_size, self.action_size)
-        self.optimizer = optim.Adam(self.network.parameters(), lr=learning_rate)
-        self.loss_fn = nn.MSELoss()
-        self.experience_buffer = deque(maxlen=1000)
-        if model_path:
+        self.stateSize = StateBuilder.STATE_SIZE
+        self.actionSize = 4
+        self.network = DQNNetwork(self.stateSize, self.actionSize)
+        self.optimizer = optim.Adam(self.network.parameters(), lr=learningRate)
+        self.lossFn = nn.MSELoss()
+        self.experienceBuffer = deque(maxlen=1000)
+        if modelPath:
             try:
-                self.network.load_state_dict(torch.load(model_path))
-                logger.info(f'Loaded pre-trained model from {model_path}')
+                self.network.load_state_dict(torch.load(modelPath))
+                logger.info(f'Loaded pre-trained model from {modelPath}')
             except Exception as e:
-                logger.warning(f'Could not load model from {model_path}: {e}')
+                logger.warning(f'Could not load model from {modelPath}: {e}')
 
     def analyse(self, ticker, mic, simDate, exchange, analysisPeriod=1):
         """Recommend trading action using Q-network inference."""
         try:
             state = StateBuilder.buildState(ticker, mic, simDate, exchange, analysisPeriod=analysisPeriod)
-            state_tensor = torch.FloatTensor(state).unsqueeze(0)
+            stateTensor = torch.FloatTensor(state).unsqueeze(0)
             with torch.no_grad():
-                q_values = self.network(state_tensor).squeeze(0)
+                qValues = self.network(stateTensor).squeeze(0)
             if random.random() < self.epsilon:
-                action = random.randint(0, self.action_size - 1)
+                action = random.randint(0, self.actionSize - 1)
             else:
-                action = torch.argmax(q_values).item()
-            action_str = self.ACTION_MAP[action]
-            q_probs = torch.softmax(q_values, dim=0)
-            confidence = float(q_probs[action].item())
-            return {'action': action_str, 'confidence': confidence, 'targetQuantity': 1, 'qvalues': q_values.cpu().numpy().tolist(), 'state': state.tolist()}
+                action = torch.argmax(qValues).item()
+            actionStr = self.ACTION_MAP[action]
+            qProbs = torch.softmax(qValues, dim=0)
+            confidence = float(qProbs[action].item())
+            return {'action': actionStr, 'confidence': confidence, 'targetQuantity': 1, 'qvalues': qValues.cpu().numpy().tolist(), 'state': state.tolist()}
         except Exception as e:
             logger.error(f'Error in Deep Q-Learning analyse: {e}')
             return {'action': 'hold', 'confidence': 0.0, 'targetQuantity': 0, 'reason': str(e)}
 
-    def recordExperience(self, state, action, reward, next_state, done):
+    def recordExperience(self, state, action, reward, nextState, done):
         """Record experience for training via experience replay."""
-        self.experience_buffer.append((state, action, reward, next_state, done))
+        self.experienceBuffer.append((state, action, reward, nextState, done))
 
-    def train(self, batch_size=32):
+    def train(self, batchSize=32):
         """Train network on random batch from experience buffer."""
-        if len(self.experience_buffer) < batch_size:
+        if len(self.experienceBuffer) < batchSize:
             return 0.0
-        batch = random.sample(self.experience_buffer, batch_size)
-        states, actions, rewards, next_states, dones = zip(*batch)
-        states_t = torch.FloatTensor(np.array(states))
-        actions_t = torch.LongTensor(actions)
-        rewards_t = torch.FloatTensor(rewards)
-        next_states_t = torch.FloatTensor(np.array(next_states))
-        dones_t = torch.FloatTensor(dones)
-        current_q = self.network(states_t).gather(1, actions_t.unsqueeze(1)).squeeze(1)
+        batch = random.sample(self.experienceBuffer, batchSize)
+        states, actions, rewards, nextStates, dones = zip(*batch)
+        statesT = torch.FloatTensor(np.array(states))
+        actionsT = torch.LongTensor(actions)
+        rewardsT = torch.FloatTensor(rewards)
+        nextStates_t = torch.FloatTensor(np.array(nextStates))
+        donesT = torch.FloatTensor(dones)
+        currentQ = self.network(statesT).gather(1, actionsT.unsqueeze(1)).squeeze(1)
         with torch.no_grad():
-            max_next_q = self.network(next_states_t).max(dim=1)[0]
-            target_q = rewards_t + self.gamma * max_next_q * (1 - dones_t)
-        loss = self.loss_fn(current_q, target_q)
+            maxNextQ = self.network(nextStates_t).max(dim=1)[0]
+            targetQ = rewardsT + self.gamma * maxNextQ * (1 - donesT)
+        loss = self.lossFn(currentQ, targetQ)
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
         return float(loss.item())
-
-    def saveModel(self, path):
-        """Save model weights to file."""
-        try:
-            torch.save(self.network.state_dict(), path)
-            logger.info(f'Model saved to {path}')
-            return True
-        except Exception as e:
-            logger.error(f'Error saving model: {e}')
-            return False
-
-    def loadModel(self, path):
-        """Load model weights from file."""
-        try:
-            self.network.load_state_dict(torch.load(path))
-            logger.info(f'Model loaded from {path}')
-            return True
-        except Exception as e:
-            logger.error(f'Error loading model: {e}')
-            return False
